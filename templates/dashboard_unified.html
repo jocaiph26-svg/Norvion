@@ -6,10 +6,9 @@
         <div class="row" style="align-items:center; gap:10px; margin-bottom:6px;">
           <h1 class="h1" style="margin:0;">Run {{ latest_run.id }}</h1>
           {% if run_scope and not run_scope.is_latest %}
-            <span class="badge">Historical run</span>
-            <span class="badge muted">Viewing snapshot</span>
+            <span class="badge">Historical (snapshot)</span>
           {% else %}
-            <span class="badge">Latest run</span>
+            <span class="badge">Latest</span>
           {% endif %}
         </div>
         <p class="sub">Recorded at: {{ latest_run.created_at|humandt }}</p>
@@ -25,21 +24,6 @@
       {% if run_scope and not run_scope.is_latest %}
         <a class="btn btn-ghost" href="/latest">Return to latest</a>
       {% endif %}
-      {% if latest_run %}
-        <div class="badge">
-          Data quality (stored)
-          <strong style="margin-left:6px;">
-            {{ '%.0f'|format(latest_run.quality.score if latest_run.quality else 0) }}/100{% if latest_run.quality and latest_run.quality.band %} ({{ latest_run.quality.band }}){% endif %}
-          </strong>
-          <span class="small" style="display:block; color:var(--muted);">
-            {% if latest_run.quality and latest_run.quality.score is not none %}
-              Stored score and band for this run.
-            {% else %}
-              Data quality information is not available for this run.
-            {% endif %}
-          </span>
-        </div>
-      {% endif %}
     </div>
   </div>
 
@@ -47,10 +31,7 @@
     <div class="card">
       <div class="card-b empty">
         <div class="empty-title">No data yet</div>
-        <div class="empty-sub">
-          Upload a transactions CSV to generate your first run summary and alert records.
-          Use the Upload CSV button in the top bar.
-        </div>
+        <div class="empty-sub">Upload a CSV to generate your first run.</div>
       </div>
     </div>
   {% else %}
@@ -169,15 +150,15 @@
           </div>
         {% endif %}
         <div class="row" style="margin-top:10px;">
-          <div class="pill">Vendors (stored)</div>
+          <div class="pill">Vendors</div>
         </div>
         {% if s.concentration_top_vendors_expense and s.concentration_top_vendors_expense|length > 0 %}
           <table style="width:100%; border-collapse:collapse; margin-top:8px;">
             <thead>
               <tr>
                 <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Vendor</th>
-                <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Amount (stored)</th>
-                <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Share (stored)</th>
+                <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Amount</th>
+                <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Share</th>
               </tr>
             </thead>
             <tbody>
@@ -195,15 +176,15 @@
         {% endif %}
 
         <div class="row" style="margin-top:12px;">
-          <div class="pill">Categories (stored)</div>
+          <div class="pill">Categories</div>
         </div>
         {% if s.concentration_top_categories_expense and s.concentration_top_categories_expense|length > 0 %}
           <table style="width:100%; border-collapse:collapse; margin-top:8px;">
             <thead>
               <tr>
                 <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Category</th>
-                <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Amount (stored)</th>
-                <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Share (stored)</th>
+                <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Amount</th>
+                <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Share</th>
               </tr>
             </thead>
             <tbody>
@@ -266,7 +247,6 @@
               Alerts recorded in this run. Open any alert to view stored details and status history.
             </p>
           </div>
-          <a class="btn btn-ghost" href="/alerts{{ run_qs if run_qs is defined else '' }}">Open Alerts</a>
         </div>
 
         <div class="hr"></div>
@@ -285,7 +265,7 @@
                     {{ a.severity|upper }}
                   </div>
                   <div class="meta">
-                    <p class="title">{{ a.title }}</p>
+                    <p class="title" style="font-weight:800;">{{ a.title }}</p>
                     <p class="why">{{ a.why }}</p>
                   </div>
                 </a>

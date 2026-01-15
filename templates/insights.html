@@ -8,10 +8,9 @@
         <div class="row" style="align-items:center; gap:10px; margin-top:8px;">
           <span class="badge">Run {{ latest_run.id }}</span>
           {% if run_scope and not run_scope.is_latest %}
-            <span class="badge">Historical run</span>
-            <span class="badge muted">Viewing snapshot</span>
+            <span class="badge">Historical (snapshot)</span>
           {% else %}
-            <span class="badge">Latest run</span>
+            <span class="badge">Latest</span>
           {% endif %}
         </div>
         <p class="sub" style="margin-top:6px;">Recorded at: {{ latest_run.created_at|humandt }}</p>
@@ -21,7 +20,6 @@
       {% if latest_run %}
         <a class="btn" href="/run/{{ latest_run.id }}{{ run_qs if run_qs is defined else '' }}">Open run detail</a>
       {% endif %}
-      <a class="btn" href="/alerts{{ run_qs if run_qs is defined else '' }}">Alerts</a>
       {% if run_scope and not run_scope.is_latest %}
         <a class="btn btn-ghost" href="/latest">Return to latest</a>
       {% endif %}
@@ -33,10 +31,7 @@
       <div class="card-b">
         <div class="empty">
           <div class="empty-title">No runs yet</div>
-          <div class="empty-sub">
-            Upload a CSV file to create your first stored run snapshot.
-            Use the Upload CSV button in the top bar.
-          </div>
+          <div class="empty-sub">Upload a CSV to create your first run.</div>
         </div>
       </div>
     </div>
@@ -48,7 +43,7 @@
         <h2>Run state (stored)</h2>
         <div class="row" style="margin-top:6px;">
           <div class="pill">Recorded at: {{ latest_run.created_at|humandt }}</div>
-          <div class="pill dim">Alerts recorded: {{ alerts|length }}</div>
+          <div class="pill dim">Alerts: {{ alerts|length }}</div>
         </div>
       </div>
     </div>
@@ -66,8 +61,8 @@
           </div>
         {% else %}
           <div class="row" style="margin-top:8px;">
-            <div class="pill">Critical alerts (stored): {{ critical_alerts|length }}</div>
-            <div class="pill dim">Other alerts (stored): {{ other_alerts|length }}</div>
+            <div class="pill">Critical: {{ critical_alerts|length }}</div>
+            <div class="pill dim">Other: {{ other_alerts|length }}</div>
           </div>
           <div style="margin-top:10px;">
             <h3 style="margin:0 0 8px 0;">Critical</h3>
@@ -155,7 +150,7 @@
 
     <div class="card">
       <div class="card-b">
-        <h2>Data confidence (stored)</h2>
+        <h2>Data confidence</h2>
         <div class="row" style="margin-top:8px;">
           {% if quality.band %}
             <div class="pill">Quality band: <strong>{{ quality.band }}</strong></div>
@@ -247,7 +242,7 @@
         <div class="card-b">
           <p class="sub">Audit metadata recorded with this run snapshot.</p>
           <div class="row" style="margin-top:8px;">
-            <div class="pill">Alerts recorded: {{ alerts|length }}</div>
+            <div class="pill">Alerts: {{ alerts|length }}</div>
             <div class="pill dim">Non-trigger reasons recorded: {{ s.non_trigger_explainability|length if s.non_trigger_explainability else 0 }}</div>
           </div>
           <div class="row" style="margin-top:8px;">

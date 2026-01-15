@@ -34,11 +34,32 @@
     <div style="height:14px;"></div>
   {% endif %}
 
-  <div class="grid cols-2">
+  <div class="card">
+    <div class="card-b">
+      <form action="/analyze" method="post" enctype="multipart/form-data">
+        <div class="field">
+          <label>CSV file</label>
+          <input class="input" type="file" name="file" accept=".csv" required>
+          <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
+            Required: <strong>date, amount</strong>. Optional: type, category, counterparty, description, invoice_id, due_date, status, direction.
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:14px;">
+          <button class="btn primary" type="submit">Create run snapshot</button>
+          <a class="btn" href="/latest">View latest</a>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <details>
+    <summary style="cursor:pointer; font-weight:900;">Upload-time defaults</summary>
+    <div style="height:10px;"></div>
     <div class="card">
       <div class="card-b">
-        <h2>Upload-time defaults (read-only)</h2>
-        <div class="hr"></div>
         <div class="row">
           <div class="pill">Currency: {{ s.currency }}</div>
           <div class="pill">Starting cash: {{ s.starting_cash|money(s.currency) }}</div>
@@ -52,29 +73,5 @@
         </div>
       </div>
     </div>
-
-    <div class="card">
-      <div class="card-b">
-        <form action="/analyze" method="post" enctype="multipart/form-data">
-          <div class="field">
-            <label>CSV file</label>
-            <input class="input" type="file" name="file" accept=".csv" required>
-            <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
-              Required: <strong>date, amount</strong>. Optional: type, category, counterparty, description, invoice_id, due_date, status, direction.
-            </div>
-          </div>
-
-          <div class="row" style="margin-top:14px;">
-            <button class="btn primary" type="submit">Create run snapshot</button>
-            <a class="btn" href="/latest">View latest</a>
-          </div>
-        </form>
-
-        <div class="hr"></div>
-        <div class="callout">
-          Built for auditability: shows stored evidence behind each alert.
-        </div>
-      </div>
-    </div>
-  </div>
+  </details>
 {% endblock %}

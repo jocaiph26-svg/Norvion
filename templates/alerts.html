@@ -26,8 +26,7 @@
         <div class="empty">
           <div class="empty-title">No alerts yet</div>
           <div class="empty-sub">
-            Upload a CSV to generate your first run. Alerts will appear here when recorded,
-            with stored notes and audit history.
+            Upload a CSV file to create your first run snapshot.
           </div>
         </div>
       </div>
@@ -53,8 +52,7 @@
           <div class="empty">
             <div class="empty-title">No active alerts</div>
             <div class="empty-sub">
-              No active alerts are recorded for this run.
-              Use the Upload CSV button in the top bar to create another run.
+              No active alerts are recorded for this run. Create another run to continue monitoring.
             </div>
             {% if latest_run %}
               <a class="btn primary" style="margin-left:8px;" href="/run/{{ latest_run.id }}{{ run_qs if run_qs is defined else '' }}">View run detail</a>
@@ -68,7 +66,7 @@
                 <a class="alert-link" href="/alerts/{{ aid }}{{ run_qs if run_qs is defined else '' }}">
                   <div class="badge {{ 'crit' if a.severity=='critical' else ('warn' if a.severity=='warning' else 'info') }}">{{ a.severity|upper }}</div>
                   <div class="meta">
-                    <p class="title">{{ a.title }}</p>
+                    <p class="title" {% if a.severity=='critical' %}style="font-weight:950;"{% endif %}>{{ a.title }}</p>
                     {% if a.why %}<p class="why">{{ a.why }}</p>{% endif %}
                     <div class="row" style="margin-top:6px; flex-wrap:wrap;">
                       <div class="pill dim">Status (stored): {{ a.status|title }}</div>
@@ -126,9 +124,10 @@
             <div style="margin-top:12px;" class="grid">
               {% for a in quieted_resolved %}
                 {% set aid = a.alert_id if a.alert_id is defined and a.alert_id else a.id %}
+                {% set status_class = a.status|lower if a.status|lower in ['review','expected','suppressed','quieted','resolved'] else '' %}
                 <div class="alert alert-compact">
                   <a class="alert-link" href="/alerts/{{ aid }}{{ run_qs if run_qs is defined else '' }}">
-                    <div class="badge">{{ a.status|upper }}</div>
+                    <div class="badge {{ status_class }}">{{ a.status|upper }}</div>
                     <div class="meta">
                       <p class="title">{{ a.title }}</p>
                       <p class="small">Updated: {{ a.updated_at|humandt }}</p>

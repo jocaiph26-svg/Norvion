@@ -7,17 +7,14 @@
       {% if run_scope %}
         <div class="row" style="margin-top:8px; gap:8px;">
           {% if run_scope.is_latest %}
-            <span class="badge">Latest run</span>
+            <span class="badge">Latest</span>
           {% else %}
-            <span class="badge">Historical run</span>
-            <span class="badge muted">Viewing snapshot</span>
+            <span class="badge">Historical (snapshot)</span>
           {% endif %}
         </div>
       {% endif %}
     </div>
     <div class="row">
-      <a class="btn" href="/dashboard{{ run_qs if run_qs is defined else "" }}">Home</a>
-      <a class="btn" href="/alerts{{ run_qs if run_qs is defined else "" }}">Alerts</a>
       {% if run_scope and not run_scope.is_latest %}
         <a class="btn btn-ghost" href="/latest">Return to latest</a>
       {% endif %}
@@ -141,9 +138,9 @@
           <thead>
             <tr>
               <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Field</th>
-              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Current (stored)</th>
-              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Prior (stored)</th>
-              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Difference (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Current</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Prior</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Difference</th>
             </tr>
           </thead>
           <tbody>
@@ -529,9 +526,9 @@
           <thead>
             <tr>
               <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Field</th>
-              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Current (stored)</th>
-              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Prior (stored)</th>
-              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Difference (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Current</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Prior</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Difference</th>
             </tr>
           </thead>
           <tbody>
