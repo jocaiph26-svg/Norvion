@@ -127,7 +127,7 @@
             <div style="margin-top:12px;" class="grid">
               {% for a in quieted_resolved %}
                 {% set aid = a.alert_id if a.alert_id is defined and a.alert_id else a.id %}
-                {% set status_class = a.status|lower if a.status|lower in ['review','expected','suppressed','quieted','resolved'] else '' %}
+                {% set status_class = a.status|lower if a.status|lower in ['review','noted','suppressed','quieted','resolved'] else '' %}
                 <div class="alert alert-compact">
                   <a class="alert-link" href="/alerts/{{ aid }}{{ run_qs if run_qs is defined else '' }}">
                     <div class="badge {{ status_class }}">{{ a.status|upper }}</div>

@@ -49,7 +49,7 @@
     </div>
 
       <div class="card kpi">
-        <div class="label">Runway</div>
+        <div class="label">Modeled runway (static burn)</div>
         <div class="value">
           {% if s.runway_days is not none and s.runway_days <= 0 %}
             ≤0 days
@@ -59,7 +59,7 @@
         </div>
         <div class="hint">
           {% if s.runway_days is not none %}
-            Runway days stored for this run.
+            Extrapolated from current cash ÷ burn rate. Assumes no revenue or expense changes.
           {% endif %}
         </div>
       </div>

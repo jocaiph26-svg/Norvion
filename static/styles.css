@@ -515,7 +515,7 @@ small { color: var(--meta); }
 
 /* Status badge variants (restrained neutral palette) */
 .badge.review { background: #fef8ed; color: #8a6a1d; }
-.badge.expected { background: #e9eef8; color: #3b5b8f; }
+.badge.noted { background: #e9eef8; color: #3b5b8f; }
 .badge.suppressed { background: #f2f4f7; color: #8a9099; }
 .badge.quieted { background: #f2f4f7; color: #8a9099; }
 .badge.resolved { background: #eef6f0; color: #4a7c59; }

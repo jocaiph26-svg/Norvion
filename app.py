@@ -8,7 +8,7 @@ RULE_INVENTORY = [
         "id": "runway_tight",
         "threshold": "< low_cash_buffer_days setting",
         "data_gates": ["daily burn data", "current cash"],
-        "suppression_reasons": ["manual ignore", "expected seasonal"],
+        "suppression_reasons": ["manual ignore", "noted seasonal"],
         "metric": "runway_days",
         "version": "v1.0",
     },
@@ -2944,7 +2944,7 @@ def update_alert_memory_for_run(
                     )
                     insert_alert_event(run_id, aid, "auto_reopened", "review", None, conn=conn)
                 else:
-                    if prev_status in {"expected", "actioned", "ignore", "snoozed"} and worsened:
+                    if prev_status in {"noted", "actioned", "ignore", "snoozed"} and worsened:
                         cur.execute(
                             "UPDATE alert_state SET status='review', updated_at=?, last_seen_run_id=?, last_score=? WHERE alert_id=?",
                             (now, run_id, float(score), aid),
@@ -3022,7 +3022,7 @@ def _apply_effective_feedback(
         ax["_updated_at"] = updated_at
         out.append(ax)
 
-    order = {"review": 0, "expected": 1, "actioned": 2, "ignore": 3, "snoozed": 4, "resolved": 5}
+    order = {"review": 0, "noted": 1, "actioned": 2, "ignore": 3, "snoozed": 4, "resolved": 5}
     out.sort(key=lambda x: (order.get(str(x.get("_status") or "review"), 9), str(x.get("severity") or "")))
     return out
 
@@ -3998,8 +3998,8 @@ def alerts_control_panel(request: Request, run_id: Optional[int] = Query(None)):
     )
 
     # Quieted/resolved (snapshot-mode): only show items that are STILL triggered now
-    # but the user has set to expected/actioned/ignore/snoozed/resolved.
-    quiet_statuses = {"expected", "actioned", "ignore", "snoozed", "resolved"}
+    # but the user has set to noted/actioned/ignore/snoozed/resolved.
+    quiet_statuses = {"noted", "actioned", "ignore", "snoozed", "resolved"}
     quieted_resolved = [a for a in alerts_with_details if a["status"] in quiet_statuses]
     quieted_resolved.sort(
         key=lambda x: (0 if x.get("status") == "resolved" else 1, str(x.get("updated_at") or "")),
@@ -4041,7 +4041,7 @@ def update_alert_status(
 ):
     _require_role(request, "admin", "update", f"alert:{alert_id}")
     status = str(status).strip().lower()
-    if status not in {"expected", "actioned", "ignore", "snoozed", "review"}:
+    if status not in {"noted", "actioned", "ignore", "snoozed", "review"}:
         status = "review"
     note_clean = str(note or "").strip()
 
@@ -4423,7 +4423,7 @@ def save_feedback(
 ):
     _require_role(request, "admin", "update", f"run:{run_id}:feedback")
     status = str(status).strip().lower()
-    if status not in {"expected", "actioned", "ignore", "snoozed", "review"}:
+    if status not in {"noted", "actioned", "ignore", "snoozed", "review"}:
         status = "review"
     note_clean = str(note or "").strip()
     tenant_id = _tenant_id(request)

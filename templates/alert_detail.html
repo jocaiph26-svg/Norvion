@@ -153,7 +153,7 @@
 
               {% if (qc.band or qc.score is not none) and ns.count < 5 %}
                 <div class="kv-row">
-                  <div class="kv-label">Data quality band</div>
+                  <div class="kv-label">Data completeness band</div>
                   <div class="kv-value">
                     {% if qc.band %}{{ qc.band }}{% endif %}
                     {% if qc.score is not none %} ({{ '%.0f'|format(qc.score) }}/100){% endif %}
@@ -262,7 +262,7 @@
               {% endif %}
               {% if run_quality %}
                 <div class="small" style="color:var(--muted); margin-bottom:6px;">
-                  <strong>Data quality:</strong>
+                  <strong>Data completeness:</strong>
                   {{ '%.0f'|format(run_quality.score if run_quality.score is not none else 0) }}/100
                   {% if run_quality.band %} ({{ run_quality.band }}){% endif %}
                 </div>
@@ -288,7 +288,7 @@
             <label>Status</label>
             <select name="status" {% if not can_update %}disabled{% endif %}>
               {% set cur = state.status if state else 'review' %}
-              {% for opt in ['review','expected','actioned','ignore','snoozed'] %}
+              {% for opt in ['review','noted','actioned','ignore','snoozed'] %}
                 <option value="{{ opt }}" {{ 'selected' if cur==opt else '' }}>{{ opt|capitalize }}</option>
               {% endfor %}
             </select>

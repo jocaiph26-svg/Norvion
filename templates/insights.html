@@ -125,7 +125,7 @@
         <div class="hint">{% if s.current_cash is not none %}Computed from starting cash + cumulative net change.{% endif %}</div>
       </div>
       <div class="card kpi">
-        <div class="label">Runway</div>
+        <div class="label">Modeled runway (static burn)</div>
         <div class="value">
           {% if s.runway_days is not none and s.runway_days <= 0 %}
             ≤0 days
@@ -133,7 +133,7 @@
             {{ '%.0f'|format(s.runway_days) }} days
           {% endif %}
         </div>
-        <div class="hint">{% if s.runway_days is not none %}Stored for this run.{% endif %}</div>
+        <div class="hint">{% if s.runway_days is not none %}Extrapolated from current cash ÷ burn rate. Assumes no revenue or expense changes.{% endif %}</div>
       </div>
       <div class="card kpi">
         <div class="label">Window net change</div>
@@ -150,13 +150,13 @@
 
     <div class="card">
       <div class="card-b">
-        <h2>Data confidence</h2>
+        <h2>Data completeness (system-derived, non-certifying)</h2>
         <div class="row" style="margin-top:8px;">
           {% if quality.band %}
-            <div class="pill">Quality band: <strong>{{ quality.band }}</strong></div>
+            <div class="pill">Completeness band: <strong>{{ quality.band }}</strong></div>
           {% endif %}
           {% if quality.score is not none %}
-            <div class="pill dim">Quality score: {{ '%.0f'|format(quality.score) }}/100</div>
+            <div class="pill dim">Completeness indicator: {{ '%.0f'|format(quality.score) }}/100</div>
           {% endif %}
           {% if s.window_days_observed is not none %}
             <div class="pill dim">Dates observed: {{ s.window_days_observed }}</div>
