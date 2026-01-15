@@ -2375,6 +2375,22 @@ def build_summary_and_alerts(
         overdue_ar = top_overdue(overdue[overdue["direction"].str.upper().eq("AR")])
         overdue_ap = top_overdue(overdue[overdue["direction"].str.upper().eq("AP")])
 
+        # Compute aging buckets for stored evidence
+        def compute_aging(d: pd.DataFrame) -> Dict[str, Any]:
+            if d.empty:
+                return {}
+            days = d["days_past_due"]
+            return {
+                "7_30_days": int((days >= 7) & (days < 30).sum()),
+                "30_60_days": int(((days >= 30) & (days < 60)).sum()),
+                "60_90_days": int(((days >= 60) & (days < 90)).sum()),
+                "90_plus_days": int((days >= 90).sum()),
+                "oldest_days": int(days.max()) if len(days) > 0 else 0,
+            }
+
+        overdue_ar_aging = compute_aging(overdue[overdue["direction"].str.upper().eq("AR")])
+        overdue_ap_aging = compute_aging(overdue[overdue["direction"].str.upper().eq("AP")])
+
     cash_series = [{"date": str(idx.date()), "cash": float(v)} for idx, v in daily["cash"].items()]
     exp_breakdown = [{"label": str(cat), "value": float(amt)} for cat, amt in by_category.head(8).items()] if len(by_category) else []
     window_expenses = w[w["type"] == "expense"].copy()
@@ -2618,12 +2634,23 @@ def build_summary_and_alerts(
         fired_checks.add("overdue_receivables")
         total_overdue = sum(x["amount"] for x in overdue_ar)
         gap = min(total_overdue / max(recent_income, 1e-6), 1.0) if recent_income > 0 else 0.5
+
+        # Build aging summary for why text
+        aging_parts = []
+        if overdue_ar_aging.get("90_plus_days", 0) > 0:
+            aging_parts.append(f"{overdue_ar_aging['90_plus_days']} invoice(s) 90+ days")
+        if overdue_ar_aging.get("60_90_days", 0) > 0:
+            aging_parts.append(f"{overdue_ar_aging['60_90_days']} invoice(s) 60-90 days")
+        if overdue_ar_aging.get("30_60_days", 0) > 0:
+            aging_parts.append(f"{overdue_ar_aging['30_60_days']} invoice(s) 30-60 days")
+        aging_summary = ", ".join(aging_parts) if aging_parts else f"Oldest: {overdue_ar_aging.get('oldest_days', 0)} days"
+
         alerts.append(
             Alert(
     id="overdue_receivables",
     severity="warning",
     title="Overdue receivables detected (cash timing risk)",
-    why=(f"Receivables appear overdue (>= {overdue_days} days). Top overdue customers sum to ~{money(total_overdue, currency)}."),
+    why=(f"Receivables appear overdue (>= {overdue_days} days). Top overdue customers sum to ~{money(total_overdue, currency)}. Aging: {aging_summary}."),
     suggested_actions=[],
     review_considerations=[
         "Top 3 overdue customers (highest impact first)",
@@ -2636,7 +2663,7 @@ def build_summary_and_alerts(
         "external_context_types": ["industry_payment_terms", "customer_credit_profiles"],
     },
     signal_strength=signal_strength_from_gap(gap),
-    evidence={"overdue_days": overdue_days, "top_overdue_customers": overdue_ar, "gap": gap},
+    evidence={"overdue_days": overdue_days, "top_overdue_customers": overdue_ar, "aging": overdue_ar_aging, "gap": gap},
 )
         )
 
@@ -2644,12 +2671,23 @@ def build_summary_and_alerts(
         fired_checks.add("overdue_payables")
         total_overdue = sum(x["amount"] for x in overdue_ap)
         gap = min(total_overdue / max(recent_expense, 1e-6), 1.0) if recent_expense > 0 else 0.3
+
+        # Build aging summary for why text
+        aging_parts = []
+        if overdue_ap_aging.get("90_plus_days", 0) > 0:
+            aging_parts.append(f"{overdue_ap_aging['90_plus_days']} invoice(s) 90+ days")
+        if overdue_ap_aging.get("60_90_days", 0) > 0:
+            aging_parts.append(f"{overdue_ap_aging['60_90_days']} invoice(s) 60-90 days")
+        if overdue_ap_aging.get("30_60_days", 0) > 0:
+            aging_parts.append(f"{overdue_ap_aging['30_60_days']} invoice(s) 30-60 days")
+        aging_summary = ", ".join(aging_parts) if aging_parts else f"Oldest: {overdue_ap_aging.get('oldest_days', 0)} days"
+
         alerts.append(
             Alert(
     id="overdue_payables",
     severity="info",
     title="Overdue payables detected (supplier relationship risk)",
-    why=(f"Payables appear overdue (>= {overdue_days} days). Top overdue suppliers sum to ~{money(total_overdue, currency)}."),
+    why=(f"Payables appear overdue (>= {overdue_days} days). Top overdue suppliers sum to ~{money(total_overdue, currency)}. Aging: {aging_summary}."),
     suggested_actions=[],
     review_considerations=[
         "Disputed items vs genuinely late payments",
@@ -2661,7 +2699,7 @@ def build_summary_and_alerts(
         "external_context_types": ["supplier_payment_terms", "vendor_credit_limits"],
     },
     signal_strength=signal_strength_from_gap(gap),
-    evidence={"overdue_days": overdue_days, "top_overdue_suppliers": overdue_ap, "gap": gap},
+    evidence={"overdue_days": overdue_days, "top_overdue_suppliers": overdue_ap, "aging": overdue_ap_aging, "gap": gap},
 )
         )
 
