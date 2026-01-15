@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="header">
+    <div>
+      <h1 class="h1">Summary</h1>
+      <p class="sub">Stored snapshot for the selected run (no recomputation).</p>
+      {% if latest_run %}
+        <div class="row" style="align-items:center; gap:10px; margin-top:8px;">
+          <span class="badge">Run {{ latest_run.id }}</span>
+          {% if run_scope and not run_scope.is_latest %}
+            <span class="badge">Historical run</span>
+            <span class="badge muted">Viewing snapshot</span>
+          {% else %}
+            <span class="badge">Latest run</span>
+          {% endif %}
+        </div>
+        <p class="sub" style="margin-top:6px;">Recorded at: {{ latest_run.created_at|humandt }}</p>
+      {% endif %}
+    </div>
+    <div class="row">
+      {% if latest_run %}
+        <a class="btn" href="/run/{{ latest_run.id }}{{ run_qs if run_qs is defined else '' }}">Open run detail</a>
+      {% endif %}
+      <a class="btn" href="/alerts{{ run_qs if run_qs is defined else '' }}">Alerts</a>
+      {% if run_scope and not run_scope.is_latest %}
+        <a class="btn btn-ghost" href="/latest">Return to latest</a>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if empty %}
+    <div class="card">
+      <div class="card-b">
+        <div class="empty">
+          <div class="empty-title">No runs yet</div>
+          <div class="empty-sub">
+            Upload a CSV file to create your first stored run snapshot.
+            Use the Upload CSV button in the top bar.
+          </div>
+        </div>
+      </div>
+    </div>
+  {% else %}
+    {% set s = summary %}
+
+    <div class="card">
+      <div class="card-b">
+        <h2>Run state (stored)</h2>
+        <div class="row" style="margin-top:6px;">
+          <div class="pill">Recorded at: {{ latest_run.created_at|humandt }}</div>
+          <div class="pill dim">Alerts recorded: {{ alerts|length }}</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="height:14px;"></div>
+
+    {% set critical_alerts = alerts|selectattr('severity','equalto','critical')|list %}
+    {% set other_alerts = alerts|rejectattr('severity','equalto','critical')|list %}
+    <div class="card">
+      <div class="card-b">
+        <h2>Alerts summary (stored)</h2>
+        {% if alerts|length == 0 %}
+          <div class="callout">
+            <strong>No alerts were triggered for this run.</strong> Some checks may not have been evaluated if required data was missing.
+          </div>
+        {% else %}
+          <div class="row" style="margin-top:8px;">
+            <div class="pill">Critical alerts (stored): {{ critical_alerts|length }}</div>
+            <div class="pill dim">Other alerts (stored): {{ other_alerts|length }}</div>
+          </div>
+          <div style="margin-top:10px;">
+            <h3 style="margin:0 0 8px 0;">Critical</h3>
+            {% if critical_alerts|length == 0 %}
+              <div class="callout">No critical alerts recorded in this run.</div>
+            {% else %}
+              <table style="width:100%; border-collapse:collapse;">
+                <thead>
+                  <tr>
+                    <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Alert</th>
+                    <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Severity</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for a in critical_alerts %}
+                    <tr>
+                      <td style="padding:6px 0;"><a class="link" href="/alerts/{{ a.id }}{{ run_qs if run_qs is defined else '' }}">{{ a.title }}</a></td>
+                      <td style="padding:6px 0;">{{ a.severity|upper }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            {% endif %}
+          </div>
+          {% if other_alerts|length > 0 %}
+            <div style="margin-top:12px;">
+              <h3 style="margin:0 0 8px 0;">Other</h3>
+              <table style="width:100%; border-collapse:collapse;">
+                <thead>
+                  <tr>
+                    <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Alert</th>
+                    <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Severity</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for a in other_alerts %}
+                    <tr>
+                      <td style="padding:6px 0;"><a class="link" href="/alerts/{{ a.id }}{{ run_qs if run_qs is defined else '' }}">{{ a.title }}</a></td>
+                      <td style="padding:6px 0;">{{ a.severity|upper }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% endif %}
+        {% endif %}
+      </div>
+    </div>
+
+    <div style="height:14px;"></div>
+
+    <div class="grid cols-3">
+      <div class="card kpi">
+        <div class="label">Current cash</div>
+        <div class="value">
+          {% if s.current_cash is not none %}
+            {{ s.current_cash|money(s.currency) }}
+          {% endif %}
+        </div>
+        <div class="hint">{% if s.current_cash is not none %}Stored for this run.{% endif %}</div>
+      </div>
+      <div class="card kpi">
+        <div class="label">Runway</div>
+        <div class="value">
+          {% if s.runway_days is not none and s.runway_days <= 0 %}
+            ≤0 days
+          {% elif s.runway_days is not none %}
+            {{ '%.0f'|format(s.runway_days) }} days
+          {% endif %}
+        </div>
+        <div class="hint">{% if s.runway_days is not none %}Stored for this run.{% endif %}</div>
+      </div>
+      <div class="card kpi">
+        <div class="label">Window net change</div>
+        <div class="value">
+          {% if s.window_net_change is not none %}
+            {{ s.window_net_change|money(s.currency) }}
+          {% endif %}
+        </div>
+        <div class="hint">{% if s.window_net_change is not none %}Stored window total.{% endif %}</div>
+      </div>
+    </div>
+
+    <div style="height:14px;"></div>
+
+    <div class="card">
+      <div class="card-b">
+        <h2>Data confidence (stored)</h2>
+        <div class="row" style="margin-top:8px;">
+          {% if quality.band %}
+            <div class="pill">Quality band: <strong>{{ quality.band }}</strong></div>
+          {% endif %}
+          {% if quality.score is not none %}
+            <div class="pill dim">Quality score: {{ '%.0f'|format(quality.score) }}/100</div>
+          {% endif %}
+          {% if s.window_days_observed is not none %}
+            <div class="pill dim">Dates observed: {{ s.window_days_observed }}</div>
+          {% endif %}
+          {% if s.window_days_span_inclusive is not none %}
+            <div class="pill dim">Window span (inclusive): {{ s.window_days_span_inclusive }}</div>
+          {% endif %}
+          {% if s.window_missing_dates is not none %}
+            <div class="pill dim">Missing dates: {{ s.window_missing_dates }}</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div style="height:14px;"></div>
+
+    <details>
+      <summary style="cursor:pointer; font-weight:900;">Coverage (stored at run time)</summary>
+      <div style="height:10px;"></div>
+      <div class="card">
+        <div class="card-b">
+          <div class="small" style="margin-top:6px; color:var(--muted);">
+            Distinct dates observed are counted from post-normalization rows within the window.
+          </div>
+          <div class="row" style="margin-top:10px;">
+            {% if s.window_transaction_count is not none %}
+              <div class="pill">Transactions in window: {{ s.window_transaction_count }}</div>
+            {% endif %}
+            {% if s.window_days_observed is not none %}
+              <div class="pill dim">Distinct dates observed: {{ s.window_days_observed }}</div>
+            {% endif %}
+            {% if s.window_days_with_income is not none %}
+              <div class="pill dim">Days with income: {{ s.window_days_with_income }}</div>
+            {% endif %}
+            {% if s.window_days_with_expense is not none %}
+              <div class="pill dim">Days with expense: {{ s.window_days_with_expense }}</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <div style="height:14px;"></div>
+
+    <details>
+      <summary style="cursor:pointer; font-weight:900;">Methodology (stored snapshot)</summary>
+      <div style="height:10px;"></div>
+      <div class="card">
+        <div class="card-b">
+          <p class="sub">All values are stored at run time and shown without recomputation.</p>
+          <div class="row" style="margin-top:8px;">
+            {% if s.window_start_date %}
+              <div class="pill">Window start: {{ s.window_start_date }}</div>
+            {% endif %}
+            {% if s.end_date %}
+              <div class="pill dim">Window end: {{ s.end_date }}</div>
+            {% endif %}
+            {% if s.window_days_span_inclusive is not none %}
+              <div class="pill dim">Window span (inclusive): {{ s.window_days_span_inclusive }}</div>
+            {% endif %}
+          </div>
+          <div class="row" style="margin-top:8px;">
+            {% if s.window_income is not none %}
+              <div class="pill">Window income: {{ s.window_income|money(s.currency) }}</div>
+            {% endif %}
+            {% if s.window_expense is not none %}
+              <div class="pill dim">Window expense: {{ s.window_expense|money(s.currency) }}</div>
+            {% endif %}
+            {% if s.window_net_change is not none %}
+              <div class="pill dim">Window net change: {{ s.window_net_change|money(s.currency) }}</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <div style="height:14px;"></div>
+
+    <details>
+      <summary style="cursor:pointer; font-weight:900;">Audit notes (stored)</summary>
+      <div style="height:10px;"></div>
+      <div class="card">
+        <div class="card-b">
+          <p class="sub">Audit metadata recorded with this run snapshot.</p>
+          <div class="row" style="margin-top:8px;">
+            <div class="pill">Alerts recorded: {{ alerts|length }}</div>
+            <div class="pill dim">Non-trigger reasons recorded: {{ s.non_trigger_explainability|length if s.non_trigger_explainability else 0 }}</div>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <div class="pill dim">Run: {{ latest_run.id }}</div>
+            <div class="pill dim">Recorded at: {{ latest_run.created_at|humandt }}</div>
+            <div class="pill dim">Filename: {{ latest_run.filename }}</div>
+            {% if latest_run.tenant_id %}
+              <div class="pill dim">Entity: {{ latest_run.tenant_id }}</div>
+            {% endif %}
+          </div>
+          {% if s.alert_quality_gate %}
+            <div class="row" style="margin-top:8px;">
+              {% if s.alert_quality_gate.threshold is not none %}
+                <div class="pill dim">Quality threshold: {{ s.alert_quality_gate.threshold }}</div>
+              {% endif %}
+              <div class="pill dim">Suppressed: {{ "true" if s.alert_quality_gate.suppressed else "false" }}</div>
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    </details>
+  {% endif %}
+{% endblock %}

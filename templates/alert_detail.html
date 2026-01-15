@@ -1,0 +1,394 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="header">
+    <div>
+      <h1 class="h1">Alert details</h1>
+    </div>
+    <div class="row">
+      <a class="btn" href="/alerts{{ run_qs if run_qs is defined else "" }}">Back to Alerts</a>
+      <a class="btn btn-ghost" href="/insights{{ run_qs if run_qs is defined else "" }}">Summary (same run)</a>
+    </div>
+  </div>
+
+  {% if run_scope and not run_scope.is_latest %}
+    <div class="callout" style="margin-bottom:14px;">
+      Viewing snapshot (historical run). Updates are disabled for stored records.
+      <a class="btn btn-sm" href="/latest" style="margin-left:8px;">Return to latest</a>
+    </div>
+  {% endif %}
+
+  <div class="grid cols-2">
+    <div class="card">
+      <div class="card-b">
+        {% if alert_details %}
+          {% set ev = alert_details.evidence or {} %}
+          {% set qc = alert_details.quality_context or {} %}
+          {% set runway_val = ev.runway_days if ev.runway_days is not none else none %}
+          {% set share_val = ev.share if ev.share is not none else none %}
+          {% set expense_change_val = ev.expense_change if ev.expense_change is not none else none %}
+          {% set income_change_val = ev.income_change if ev.income_change is not none else none %}
+          {% set recent_expense_val = ev.recent_expense if ev.recent_expense is not none else none %}
+          {% set recent_income_val = ev.recent_income if ev.recent_income is not none else none %}
+          {% set threshold_days_val = ev.threshold_days if ev.threshold_days is not none else none %}
+          {% set threshold_val = ev.threshold if ev.threshold is not none and ev.threshold != '' else none %}
+          {% set overdue_days_val = ev.overdue_days if ev.overdue_days is not none else none %}
+          {% set gap_val = ev.gap if ev.gap is not none else none %}
+          {% set has_key_evidence = (
+            ev.comparison_label or
+            runway_val is not none or
+            share_val is not none or
+            expense_change_val is not none or
+            income_change_val is not none or
+            recent_expense_val is not none or
+            recent_income_val is not none or
+            threshold_days_val is not none or
+            threshold_val is not none or
+            overdue_days_val is not none or
+            gap_val is not none or
+            (qc.band) or
+            (qc.score is not none)
+          ) %}
+          {% set ns = namespace(count=0) %}
+          <div class="badge {{ 'crit' if alert_details.severity=='critical' else ('warn' if alert_details.severity=='warning' else 'info') }}">
+            {{ alert_details.severity|upper }}
+          </div>
+          <h2 style="margin-top:10px;">{{ alert_details.title }}</h2>
+          <div class="small" style="margin-top:6px; color:var(--muted);">Recorded summary (stored)</div>
+          {% if alert_details.why %}
+            <p class="sub" style="margin-top:4px; color:var(--text);">{{ alert_details.why }}</p>
+          {% else %}
+            <p class="sub" style="margin-top:4px; color:var(--muted);">No stored summary is available for this alert.</p>
+          {% endif %}
+          {% if alert_details.suppressed %}
+            <div class="small" style="margin-top:6px; color:var(--muted);">
+              {% if alert_details.suppression_reason %}
+                Suppressed (stored): {{ alert_details.suppression_reason }}
+              {% else %}
+                Suppressed (stored)
+              {% endif %}
+            </div>
+          {% endif %}
+          {% if has_key_evidence %}
+            <div class="hr"></div>
+            <div style="font-weight:900; margin-bottom:8px;">Key evidence (stored)</div>
+            <div class="kv">
+              {% if ev.comparison_label and ns.count < 5 %}
+                <div class="kv-row">
+                  <div class="kv-label">Timeframe</div>
+                  <div class="kv-value">{{ ev.comparison_label }}</div>
+                </div>
+                {% set ns.count = ns.count + 1 %}
+              {% endif %}
+
+              {% if ns.count < 5 %}
+                {% if runway_val is not none %}
+                  <div class="kv-row">
+                    <div class="kv-label">Observed runway</div>
+                    <div class="kv-value">{{ runway_val|num(0) }} days</div>
+                  </div>
+                  {% set ns.count = ns.count + 1 %}
+                {% elif share_val is not none %}
+                  <div class="kv-row">
+                    <div class="kv-label">Observed share</div>
+                    <div class="kv-value">{{ share_val|pct }}</div>
+                  </div>
+                  {% set ns.count = ns.count + 1 %}
+                {% elif expense_change_val is not none %}
+                  <div class="kv-row">
+                    <div class="kv-label">Observed expense change</div>
+                    <div class="kv-value">{{ expense_change_val|pct }}</div>
+                  </div>
+                  {% set ns.count = ns.count + 1 %}
+                {% elif income_change_val is not none %}
+                  <div class="kv-row">
+                    <div class="kv-label">Observed income change</div>
+                    <div class="kv-value">{{ income_change_val|pct }}</div>
+                  </div>
+                  {% set ns.count = ns.count + 1 %}
+                {% elif recent_expense_val is not none %}
+                  <div class="kv-row">
+                    <div class="kv-label">Observed expense</div>
+                    <div class="kv-value">{{ recent_expense_val|num(2) }}</div>
+                  </div>
+                  {% set ns.count = ns.count + 1 %}
+                {% elif recent_income_val is not none %}
+                  <div class="kv-row">
+                    <div class="kv-label">Observed income</div>
+                    <div class="kv-value">{{ recent_income_val|num(2) }}</div>
+                  </div>
+                  {% set ns.count = ns.count + 1 %}
+                {% endif %}
+              {% endif %}
+
+              {% if threshold_days_val is not none and ns.count < 5 %}
+                <div class="kv-row">
+                  <div class="kv-label">Threshold</div>
+                  <div class="kv-value">{{ threshold_days_val|num(0) }} days</div>
+                </div>
+                {% set ns.count = ns.count + 1 %}
+              {% endif %}
+
+              {% if threshold_val is not none and ns.count < 5 %}
+                <div class="kv-row">
+                  <div class="kv-label">Threshold</div>
+                  <div class="kv-value">{{ threshold_val }}</div>
+                </div>
+                {% set ns.count = ns.count + 1 %}
+              {% endif %}
+
+              {% if overdue_days_val is not none and ns.count < 5 %}
+                <div class="kv-row">
+                  <div class="kv-label">Overdue days</div>
+                  <div class="kv-value">{{ overdue_days_val|num(0) }} days</div>
+                </div>
+                {% set ns.count = ns.count + 1 %}
+              {% endif %}
+
+              {% if gap_val is not none and ns.count < 5 %}
+                <div class="kv-row">
+                  <div class="kv-label">Difference (stored)</div>
+                  <div class="kv-value">{{ gap_val|pct }}</div>
+                </div>
+                {% set ns.count = ns.count + 1 %}
+              {% endif %}
+
+              {% if (qc.band or qc.score is not none) and ns.count < 5 %}
+                <div class="kv-row">
+                  <div class="kv-label">Data quality band</div>
+                  <div class="kv-value">
+                    {% if qc.band %}{{ qc.band }}{% endif %}
+                    {% if qc.score is not none %} ({{ '%.0f'|format(qc.score) }}/100){% endif %}
+                  </div>
+                </div>
+                {% set ns.count = ns.count + 1 %}
+              {% endif %}
+            </div>
+            <div class="small" style="margin-top:6px; color:var(--muted);">
+              Values are shown exactly as stored at run time.
+            </div>
+          {% endif %}
+
+          <div class="hr"></div>
+          <details>
+            <summary style="cursor:pointer; font-weight:900;">Technical / audit details (stored)</summary>
+            <div style="height:10px;"></div>
+            <div style="font-weight:900; margin-bottom:8px;">Rule metadata</div>
+            <table style="width:100%; border-collapse:collapse;">
+              <tbody>
+                <tr>
+                  <td style="padding:6px 0; font-weight:800;">Alert ID</td>
+                  <td style="padding:6px 0;">{{ alert_id }}</td>
+                </tr>
+                {% if alert_details.rule_id %}
+                  <tr>
+                    <td style="padding:6px 0; font-weight:800;">Rule ID</td>
+                    <td style="padding:6px 0;">{{ alert_details.rule_id }}</td>
+                  </tr>
+                {% endif %}
+                {% if alert_details.rule_name %}
+                  <tr>
+                    <td style="padding:6px 0; font-weight:800;">Rule name</td>
+                    <td style="padding:6px 0;">{{ alert_details.rule_name }}</td>
+                  </tr>
+                {% endif %}
+                {% if alert_details.rule_version %}
+                  <tr>
+                    <td style="padding:6px 0; font-weight:800;">Rule version</td>
+                    <td style="padding:6px 0;">{{ alert_details.rule_version }}</td>
+                  </tr>
+                {% endif %}
+                {% if alert_details.rule_threshold %}
+                  <tr>
+                    <td style="padding:6px 0; font-weight:800;">Rule threshold</td>
+                    <td style="padding:6px 0;">{{ alert_details.rule_threshold }}</td>
+                  </tr>
+                {% endif %}
+                {% if alert_details.data_requirements %}
+                  <tr>
+                    <td style="padding:6px 0; font-weight:800;">Data gates</td>
+                    <td style="padding:6px 0;">
+                      {{ alert_details.data_requirements|join(", ") }}
+                    </td>
+                  </tr>
+                {% endif %}
+              </tbody>
+            </table>
+
+            {% if alert_details.evidence and alert_details.evidence.items is defined %}
+              {% set ev_ns = namespace(rows=0) %}
+              {% for k, v in alert_details.evidence.items() %}
+                {% if v is not none and v != '' %}
+                  {% set ev_ns.rows = ev_ns.rows + 1 %}
+                {% endif %}
+              {% endfor %}
+              {% if ev_ns.rows > 0 %}
+                <div class="hr"></div>
+                <div style="font-weight:900; margin-bottom:8px;">Evidence</div>
+                <table style="width:100%; border-collapse:collapse;">
+                  <thead>
+                    <tr>
+                      <th style="text-align:left; border-bottom:1px solid var(--border); padding:6px 0;">Field</th>
+                      <th style="text-align:left; border-bottom:1px solid var(--border); padding:6px 0;">Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for k, v in alert_details.evidence.items() %}
+                      {% if v is not none and v != '' %}
+                        <tr>
+                          <td style="padding:6px 0;">{{ k }}</td>
+                          <td style="padding:6px 0;">{{ v }}</td>
+                        </tr>
+                      {% endif %}
+                    {% endfor %}
+                  </tbody>
+                </table>
+              {% endif %}
+            {% endif %}
+
+            {% if ev.inputs %}
+              <div class="hr"></div>
+              <div style="font-weight:900; margin-bottom:8px;">Inputs (stored)</div>
+              <div class="mono" style="white-space:pre-wrap; font-size:12px; color:var(--muted);">
+                {{ ev.inputs }}
+              </div>
+            {% endif %}
+
+            {% if chosen_run_meta or run_quality %}
+              <div class="hr"></div>
+              <div style="font-weight:900; margin-bottom:8px;">Run context</div>
+              {% if chosen_run_meta %}
+                <div class="small" style="color:var(--muted); margin-bottom:6px;">
+                  <strong>Run:</strong> Run {{ chosen_run_meta.id }} · {{ chosen_run_meta.created_at }} · {{ chosen_run_meta.filename }}
+                </div>
+              {% endif %}
+              {% if run_quality %}
+                <div class="small" style="color:var(--muted); margin-bottom:6px;">
+                  <strong>Data quality:</strong>
+                  {{ '%.0f'|format(run_quality.score if run_quality.score is not none else 0) }}/100
+                  {% if run_quality.band %} ({{ run_quality.band }}){% endif %}
+                </div>
+              {% endif %}
+            {% endif %}
+          </details>
+        {% else %}
+          <div class="callout">This alert is not triggered in the selected run. Stored status and audit history remain available.</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <details class="card emphasis">
+      <summary style="cursor:pointer; font-weight:900; padding:16px 20px;">Status record (stored)</summary>
+      <div class="card-b" style="padding-top:6px;">
+        {% if not can_update %}
+          <div class="callout">
+            Status updates are disabled because this is a historical run (read-only).
+          </div>
+        {% endif %}
+        <form action="/alerts/{{ alert_id }}/update" method="post">
+          <div class="field">
+            <label>Status</label>
+            <select name="status" {% if not can_update %}disabled{% endif %}>
+              {% set cur = state.status if state else 'review' %}
+              {% for opt in ['review','expected','actioned','ignore','snoozed'] %}
+                <option value="{{ opt }}" {{ 'selected' if cur==opt else '' }}>{{ opt|capitalize }}</option>
+              {% endfor %}
+            </select>
+            <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
+              Status is a stored workflow label. It does not change calculations or alert evaluation.
+            </div>
+            <div class="small" style="color:var(--muted); font-size:12px; margin-top:4px;">
+              Changes are recorded when you click Record status.
+            </div>
+            <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
+              Status may return to review if the stored score increases in a later run.
+            </div>
+          </div>
+
+          <div class="field" style="margin-top:12px;">
+            <label>Note (optional)</label>
+            <textarea name="note" class="note-textarea js-autosize" placeholder="Optional note (stored)" {% if not can_update %}disabled{% endif %} style="min-height:2.5em; resize:none;">{{ state.note if state and state.note is not none else '' }}</textarea>
+          </div>
+
+          <div class="row" style="margin-top:14px;">
+            <button class="btn btn-primary" type="submit" {% if not can_update %}disabled{% else %}disabled{% endif %}>Record status</button>
+            {% if state %}
+              <div class="pill dim">Last updated: {{ state.updated_at|humandt }}</div>
+              <div class="pill dim">Last score: {{ '%.2f'|format(state.last_score or 0) }}</div>
+            {% endif %}
+          </div>
+        </form>
+        <script>
+          (function() {
+            var form = document.querySelector('form[action="/alerts/{{ alert_id }}/update"]');
+            if (!form) return;
+            var select = form.querySelector('select[name="status"]');
+            var note = form.querySelector('textarea[name="note"]');
+            var btn = form.querySelector('button[type="submit"]');
+            if (!select || !note || !btn) return;
+            var canUpdate = {{ 'true' if can_update else 'false' }};
+            var initialStatus = select.value;
+            var initialNote = note.value;
+            function toggle() {
+              if (!canUpdate) {
+                btn.disabled = true;
+                return;
+              }
+              var changed = (select.value !== initialStatus) || (note.value !== initialNote);
+              btn.disabled = !changed;
+            }
+            select.addEventListener('change', toggle);
+            note.addEventListener('input', toggle);
+            toggle();
+          })();
+        </script>
+      </div>
+    </details>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="grid cols-2">
+    <div class="card">
+      <div class="card-b">
+        <h2>Audit trail</h2>
+        <p class="sub" style="margin-top:6px;">Events are stored append-only for this alert.</p>
+        <p class="sub" style="margin-top:4px;">Events are shown in recorded order with stored status and note.</p>
+        <details style="margin-top:10px;">
+          <summary style="cursor:pointer; font-weight:900;">Technical / audit details (stored)</summary>
+          <div style="height:10px;"></div>
+          <div class="hr"></div>
+          {% if not audit_allowed %}
+            <div class="callout">Audit trail is available to admin or auditor access only.</div>
+          {% elif events|length == 0 %}
+            <div class="callout">No events recorded yet.</div>
+          {% else %}
+            <table class="table">
+              <thead><tr><th>Time</th><th>Event</th><th>Status</th><th>Note</th><th>Run</th></tr></thead>
+              <tbody>
+                {% for e in events %}
+                <tr>
+                  <td class="mono">{{ e.created_at|humandt }}</td>
+                  <td style="font-weight:800;">{{ e.event_type }}</td>
+                  <td>{{ e.status or '' }}</td>
+                  <td>{{ e.note or '' }}</td>
+                  <td>{% if e.run_id %}<a class="link" href="/run/{{ e.run_id }}">Run {{ e.run_id }}</a>{% endif %}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% endif %}
+        </details>
+      </div>
+    </div>
+
+    <details class="card">
+      <summary style="cursor:pointer; font-weight:900; padding:16px 20px;">Technical / audit details (stored)</summary>
+      <div class="card-b" style="padding-top:6px;">
+        <h2>Where it appeared (stored)</h2>
+        <p class="sub" style="margin-top:6px;">This section is unavailable because it would require derived scans.</p>
+        <div class="hr"></div>
+        <div class="callout">No stored run list is available for this alert.</div>
+      </div>
+    </details>
+  </div>
+{% endblock %}

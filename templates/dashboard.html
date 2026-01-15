@@ -1,0 +1,1236 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="header">
+    <div>
+      <h1 class="h1">Run {{ run_id }}</h1>
+      <p class="sub">Recorded at: {{ created_at|humandt }}</p>
+      {% if run_scope %}
+        <div class="row" style="margin-top:8px; gap:8px;">
+          {% if run_scope.is_latest %}
+            <span class="badge">Latest run</span>
+          {% else %}
+            <span class="badge">Historical run</span>
+            <span class="badge muted">Viewing snapshot</span>
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+    <div class="row">
+      <a class="btn" href="/dashboard{{ run_qs if run_qs is defined else "" }}">Home</a>
+      <a class="btn" href="/alerts{{ run_qs if run_qs is defined else "" }}">Alerts</a>
+      {% if run_scope and not run_scope.is_latest %}
+        <a class="btn btn-ghost" href="/latest">Return to latest</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="grid cols-4">
+    <div class="card kpi">
+      <div class="label">Current cash</div>
+      <div class="value">
+        {% if summary.current_cash is not none %}
+          {{ summary.current_cash|money(summary.currency) }}
+        {% endif %}
+      </div>
+      <div class="hint">{% if summary.current_cash is not none %}Stored for this run.{% endif %}</div>
+    </div>
+    <div class="card kpi">
+      <div class="label">Runway</div>
+      <div class="value">
+        {% if summary.runway_days is not none and summary.runway_days <= 0 %}
+          ≤0 days
+        {% elif summary.runway_days is not none %}
+          {{ '%.0f'|format(summary.runway_days) }} days
+        {% endif %}
+      </div>
+      <div class="hint">
+        {% if summary.runway_days is not none %}
+          Runway days stored for this run.
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card kpi">
+      <div class="label">Recent income</div>
+      <div class="value">
+        {% if summary.recent_income is defined and summary.recent_income is not none %}
+          {{ summary.recent_income|money(summary.currency) }}
+        {% endif %}
+      </div>
+      <div class="hint">{% if summary.recent_income is defined and summary.recent_income is not none %}Stored in the most recent compare window.{% endif %}</div>
+    </div>
+    <div class="card kpi">
+      <div class="label">Recent expenses</div>
+      <div class="value">
+        {% if summary.recent_expense is defined and summary.recent_expense is not none %}
+          {{ summary.recent_expense|money(summary.currency) }}
+        {% endif %}
+      </div>
+      <div class="hint">{% if summary.recent_expense is defined and summary.recent_expense is not none %}Stored in the most recent compare window.{% endif %}</div>
+    </div>
+    <div class="card kpi">
+      <div class="label">Data quality (stored)</div>
+      <div class="value">
+        {% if quality.score is not none %}
+          {{ '%.0f'|format(quality.score) }}/100{% if quality.band %} ({{ quality.band }}){% endif %}
+        {% elif quality.band %}
+          {{ quality.band }}
+        {% endif %}
+      </div>
+      <div class="hint">
+        {% if quality.score is not none or quality.band %}
+          Stored score and band for this run.
+        {% else %}
+          Data quality information is not available for this run.
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>What changed since prior run (stored)</h2>
+      <div class="small" style="margin-top:6px; color:var(--muted);">
+        Differences are stored at run creation and shown without recomputation.
+      </div>
+      {% if summary.run_to_run %}
+        <div class="small" style="margin-top:8px; color:#334155;">
+          Prior run: <span class="mono">#{{ summary.run_to_run.prior_run_id }}</span> ·
+          <span class="mono">{{ summary.run_to_run.prior_created_at|humandt }}</span>
+        </div>
+        {% set money_fields = [
+          "current_cash",
+          "window_income",
+          "window_expense",
+          "window_net_change",
+          "recent_income",
+          "recent_expense",
+          "concentration_expense_denominator"
+        ] %}
+        {% set pct_fields = ["income_change", "expense_change"] %}
+        {% set day_fields = [
+          "runway_days",
+          "window_days_observed",
+          "window_days_span_inclusive",
+          "window_days_with_income",
+          "window_days_with_expense",
+          "window_missing_dates"
+        ] %}
+        {% set count_fields = ["window_transaction_count"] %}
+        {% set field_labels = {
+          "current_cash": "Current cash",
+          "window_income": "Window income",
+          "window_expense": "Window expense",
+          "window_net_change": "Window net change",
+          "recent_income": "Recent income",
+          "recent_expense": "Recent expense",
+          "income_change": "Income change",
+          "expense_change": "Expense change",
+          "runway_days": "Runway (days)",
+          "window_days_observed": "Distinct dates observed",
+          "window_days_span_inclusive": "Window span (inclusive)",
+          "window_days_with_income": "Days with income",
+          "window_days_with_expense": "Days with expense",
+          "window_missing_dates": "Missing dates",
+          "window_transaction_count": "Transactions in window",
+          "concentration_expense_denominator": "Expense denominator"
+        } %}
+        <table style="width:100%; border-collapse:collapse; margin-top:10px;">
+          <thead>
+            <tr>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Field</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Current (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Prior (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Difference (stored)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in summary.run_to_run.fields %}
+              <tr>
+                <td style="padding:6px 0;">
+                  {{ field_labels[item.field] if item.field in field_labels else item.field|replace('_',' ')|title }}
+                </td>
+                <td style="padding:6px 0;">
+                  {% if item.current is not none %}
+                    {% if item.field in money_fields %}
+                      {{ item.current|money(summary.currency) }}
+                    {% elif item.field in pct_fields %}
+                      {{ item.current|pct }}
+                    {% elif item.field in day_fields %}
+                      {{ item.current|num(0) }}
+                    {% elif item.field in count_fields %}
+                      {{ item.current|num(0) }}
+                    {% else %}
+                      {{ item.current|num(2) }}
+                    {% endif %}
+                  {% endif %}
+                </td>
+                <td style="padding:6px 0;">
+                  {% if item.prior is not none %}
+                    {% if item.field in money_fields %}
+                      {{ item.prior|money(summary.currency) }}
+                    {% elif item.field in pct_fields %}
+                      {{ item.prior|pct }}
+                    {% elif item.field in day_fields %}
+                      {{ item.prior|num(0) }}
+                    {% elif item.field in count_fields %}
+                      {{ item.prior|num(0) }}
+                    {% else %}
+                      {{ item.prior|num(2) }}
+                    {% endif %}
+                  {% endif %}
+                </td>
+                <td style="padding:6px 0;">
+                  {% if item.delta is not none %}
+                    {% if item.field in money_fields %}
+                      {{ item.delta|money(summary.currency) }}
+                    {% elif item.field in pct_fields %}
+                      {{ item.delta|pct }}
+                    {% elif item.field in day_fields %}
+                      {{ item.delta|num(0) }}
+                    {% elif item.field in count_fields %}
+                      {{ item.delta|num(0) }}
+                    {% else %}
+                      {{ item.delta|num(2) }}
+                    {% endif %}
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="small" style="margin-top:8px; color:var(--muted);">
+          No prior run is available for comparison.
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Alerts summary (stored)</h2>
+      <p class="sub" style="margin-top:6px;">Alerts recorded in this run.</p>
+      {% if alerts|length == 0 %}
+        <div class="callout">
+          <strong>No alerts were triggered for this run.</strong> Some checks may not have been evaluated if required data was missing.
+        </div>
+      {% else %}
+        <div class="row" style="margin-top:8px;">
+          <div class="pill">Alerts recorded (stored): {{ alerts|length }}</div>
+          <a class="btn btn-ghost" href="/alerts{{ run_qs if run_qs is defined else '' }}">Open Alerts</a>
+        </div>
+        <div style="margin-top:10px;">
+          <table style="width:100%; border-collapse:collapse;">
+            <thead>
+              <tr>
+                <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Alert</th>
+                <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Severity (stored)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for a in alerts[:5] %}
+                <tr>
+                  <td style="padding:6px 0;"><a class="link" href="/alerts/{{ a.id }}{{ run_qs if run_qs is defined else '' }}">{{ a.title }}</a></td>
+                  <td style="padding:6px 0;">{{ a.severity|upper }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% if alerts|length > 5 %}
+            <div class="small" style="color:var(--muted); margin-top:6px;">Showing first 5 alerts.</div>
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <details class="card disclosure">
+    <summary style="cursor:pointer; font-weight:900; padding:16px 20px;">Technical / audit details (stored)</summary>
+    <div class="card-b" style="padding-top:6px;">
+      <div class="card">
+        <div class="card-b">
+          <h2>Run context (stored)</h2>
+          <div class="row" style="margin-top:8px; flex-wrap:wrap;">
+            <div class="pill">Recorded at: {{ created_at|humandt }}</div>
+            {% if summary.window_start_date and summary.end_date %}
+              <div class="pill dim">Window: {{ summary.window_start_date }} to {{ summary.end_date }} (inclusive)</div>
+            {% endif %}
+            <div class="pill dim">Data quality: {{ '%.0f'|format(quality.score or 0) }}/100{% if quality.band %} ({{ quality.band }}){% endif %}</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="height:14px;"></div>
+
+      <div class="card">
+        <div class="card-b">
+          <h2>Window totals (stored at run time)</h2>
+          {% if summary.window_start_date and summary.end_date %}
+            <div class="small" style="margin-top:6px; color:var(--muted);">
+              Window: {{ summary.window_start_date }} to {{ summary.end_date }} (inclusive).
+            </div>
+          {% endif %}
+          <div class="row" style="margin-top:10px;">
+            {% if summary.window_income is not none %}
+              <div class="pill">Window income (stored): {{ summary.window_income|money(summary.currency) }}</div>
+            {% endif %}
+            {% if summary.window_expense is not none %}
+              <div class="pill dim">Window expense (stored): {{ summary.window_expense|money(summary.currency) }}</div>
+            {% endif %}
+            {% if summary.window_net_change is not none %}
+              <div class="pill dim">Window net change (stored): {{ summary.window_net_change|money(summary.currency) }}</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <div style="height:14px;"></div>
+
+      <div class="grid cols-2">
+        <div class="card kpi">
+          <div class="label">Income change (stored)</div>
+          <div class="value">
+            {% if summary.income_change is not none %}
+              {{ summary.income_change|pct }}
+            {% endif %}
+          </div>
+          <div class="hint">{% if summary.income_change is not none %}Stored comparison: recent vs prior window.{% endif %}</div>
+        </div>
+        <div class="card kpi">
+          <div class="label">Expense change (stored)</div>
+          <div class="value">
+            {% if summary.expense_change is not none %}
+              {{ summary.expense_change|pct }}
+            {% endif %}
+          </div>
+          <div class="hint">{% if summary.expense_change is not none %}Stored comparison: recent vs prior window.{% endif %}</div>
+        </div>
+      </div>
+
+      <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Coverage (stored at run time)</h2>
+      <div class="small" style="margin-top:6px; color:var(--muted);">
+        Distinct dates observed are counted from post-normalization rows within the window.
+      </div>
+      <div class="row" style="margin-top:10px;">
+        {% if summary.window_transaction_count is not none %}
+          <div class="pill">Transactions in window (stored): {{ summary.window_transaction_count }}</div>
+        {% endif %}
+        {% if summary.window_days_observed is not none %}
+          <div class="pill dim">Distinct dates observed (stored): {{ summary.window_days_observed }}</div>
+        {% endif %}
+        {% if summary.window_days_span_inclusive is not none %}
+          <div class="pill dim">Window span (stored, inclusive): {{ summary.window_days_span_inclusive }}</div>
+        {% endif %}
+      </div>
+      <div class="row" style="margin-top:8px;">
+        {% if summary.window_days_with_income is not none %}
+          <div class="pill dim">Days with income (stored): {{ summary.window_days_with_income }}</div>
+        {% endif %}
+        {% if summary.window_days_with_expense is not none %}
+          <div class="pill dim">Days with expense (stored): {{ summary.window_days_with_expense }}</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Coverage continuity (stored at run time)</h2>
+      <div class="small" style="margin-top:6px; color:var(--muted);">
+        Missing dates are counted as inclusive window span minus distinct dates observed.
+      </div>
+      <div class="row" style="margin-top:10px;">
+        {% if summary.window_days_span_inclusive is not none %}
+          <div class="pill">Window span (stored, inclusive): {{ summary.window_days_span_inclusive }}</div>
+        {% endif %}
+        {% if summary.window_days_observed is not none %}
+          <div class="pill dim">Distinct dates observed (stored): {{ summary.window_days_observed }}</div>
+        {% endif %}
+        {% if summary.window_missing_dates is not none %}
+          <div class="pill dim">Missing dates (stored): {{ summary.window_missing_dates }}</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Observed run snapshot (stored at run time)</h2>
+      <div class="small" style="margin-top:6px; color:var(--muted);">
+        Values below are stored for this run and shown without recomputation.
+      </div>
+      <table style="width:100%; border-collapse:collapse; margin-top:10px;">
+        <tbody>
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Run</td>
+            <td style="padding:6px 0;">
+              <div><span class="mono">run_id</span> {{ run_id }}</div>
+              <div><span class="mono">created_at</span> {{ created_at|humandt }}</div>
+              <div><span class="mono">filename</span> {{ filename }}</div>
+            </td>
+          </tr>
+          {% if run_entity_id %}
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Entity</td>
+              <td style="padding:6px 0;">
+                <span class="mono">tenant_id</span> {{ run_entity_id }}
+              </td>
+            </tr>
+          {% endif %}
+          {% if summary.window_start_date or summary.end_date or summary.window_days_span_inclusive is not none %}
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Window</td>
+              <td style="padding:6px 0;">
+                {% if summary.window_start_date %}
+                  <div><span class="mono">window_start_date</span> {{ summary.window_start_date }}</div>
+                {% endif %}
+                {% if summary.end_date %}
+                  <div><span class="mono">end_date</span> {{ summary.end_date }}</div>
+                {% endif %}
+                {% if summary.window_days_span_inclusive is not none %}
+                  <div><span class="mono">window_days_span_inclusive</span> {{ summary.window_days_span_inclusive }}</div>
+                {% endif %}
+              </td>
+            </tr>
+          {% endif %}
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Window totals</td>
+            <td style="padding:6px 0;">
+              {% if summary.window_income is not none %}
+                <div><span class="mono">window_income</span> {{ summary.window_income|money(summary.currency) }}</div>
+              {% endif %}
+              {% if summary.window_expense is not none %}
+                <div><span class="mono">window_expense</span> {{ summary.window_expense|money(summary.currency) }}</div>
+              {% endif %}
+              {% if summary.window_net_change is not none %}
+                <div><span class="mono">window_net_change</span> {{ summary.window_net_change|money(summary.currency) }}</div>
+              {% endif %}
+            </td>
+          </tr>
+          {% if summary.window_transaction_count is not none or summary.window_days_observed is not none or summary.window_days_with_income is not none or summary.window_days_with_expense is not none or summary.window_missing_dates is not none %}
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Coverage</td>
+              <td style="padding:6px 0;">
+                {% if summary.window_transaction_count is not none %}
+                  <div><span class="mono">window_transaction_count</span> {{ summary.window_transaction_count }}</div>
+                {% endif %}
+                {% if summary.window_days_observed is not none %}
+                  <div><span class="mono">window_days_observed</span> {{ summary.window_days_observed }}</div>
+                {% endif %}
+                {% if summary.window_days_with_income is not none %}
+                  <div><span class="mono">window_days_with_income</span> {{ summary.window_days_with_income }}</div>
+                {% endif %}
+                {% if summary.window_days_with_expense is not none %}
+                  <div><span class="mono">window_days_with_expense</span> {{ summary.window_days_with_expense }}</div>
+                {% endif %}
+                {% if summary.window_missing_dates is not none %}
+                  <div><span class="mono">window_missing_dates</span> {{ summary.window_missing_dates }}</div>
+                {% endif %}
+              </td>
+            </tr>
+          {% endif %}
+          {% if quality.score is not none or quality.band %}
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Data quality</td>
+              <td style="padding:6px 0;">
+                {% if quality.score is not none %}
+                  <div><span class="mono">quality.score</span> {{ '%.0f'|format(quality.score) }}</div>
+                {% endif %}
+                {% if quality.band %}
+                  <div><span class="mono">quality.band</span> {{ quality.band }}</div>
+                {% endif %}
+              </td>
+            </tr>
+          {% endif %}
+          {% if summary.concentration_top_n is not none or summary.concentration_expense_denominator is not none %}
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Observed distribution</td>
+              <td style="padding:6px 0;">
+                {% if summary.concentration_top_n is not none %}
+                  <div><span class="mono">concentration_top_n</span> {{ summary.concentration_top_n }}</div>
+                {% endif %}
+                {% if summary.concentration_expense_denominator is not none %}
+                  <div><span class="mono">concentration_expense_denominator</span> {{ summary.concentration_expense_denominator|money(summary.currency) }}</div>
+                {% endif %}
+              </td>
+            </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Run‑to‑run change ledger (stored at run time)</h2>
+      <div class="small" style="margin-top:6px; color:var(--muted);">
+        Differences are stored at run creation and shown without recomputation.
+      </div>
+      {% if summary.run_to_run %}
+        <div class="small" style="margin-top:8px; color:#334155;">
+          Prior run: <span class="mono">#{{ summary.run_to_run.prior_run_id }}</span> ·
+          <span class="mono">{{ summary.run_to_run.prior_created_at|humandt }}</span>
+        </div>
+        {% set money_fields = [
+          "current_cash",
+          "window_income",
+          "window_expense",
+          "window_net_change",
+          "recent_income",
+          "recent_expense",
+          "concentration_expense_denominator"
+        ] %}
+        {% set pct_fields = ["income_change", "expense_change"] %}
+        {% set day_fields = [
+          "runway_days",
+          "window_days_observed",
+          "window_days_span_inclusive",
+          "window_days_with_income",
+          "window_days_with_expense",
+          "window_missing_dates"
+        ] %}
+        {% set count_fields = ["window_transaction_count"] %}
+        {% set field_labels = {
+          "current_cash": "Current cash",
+          "window_income": "Window income",
+          "window_expense": "Window expense",
+          "window_net_change": "Window net change",
+          "recent_income": "Recent income",
+          "recent_expense": "Recent expense",
+          "income_change": "Income change",
+          "expense_change": "Expense change",
+          "runway_days": "Runway (days)",
+          "window_days_observed": "Distinct dates observed",
+          "window_days_span_inclusive": "Window span (inclusive)",
+          "window_days_with_income": "Days with income",
+          "window_days_with_expense": "Days with expense",
+          "window_missing_dates": "Missing dates",
+          "window_transaction_count": "Transactions in window",
+          "concentration_expense_denominator": "Expense denominator"
+        } %}
+        <table style="width:100%; border-collapse:collapse; margin-top:10px;">
+          <thead>
+            <tr>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Field</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Current (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Prior (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Difference (stored)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in summary.run_to_run.fields %}
+              <tr>
+                <td style="padding:6px 0;">
+                  {{ field_labels[item.field] if item.field in field_labels else item.field|replace('_',' ')|title }}
+                  <div class="small mono" style="color:var(--meta); margin-top:4px;">field: {{ item.field }}</div>
+                </td>
+                <td style="padding:6px 0;">
+                  {% if item.current is not none %}
+                    {% if item.field in money_fields %}
+                      {{ item.current|money(summary.currency) }}
+                    {% elif item.field in pct_fields %}
+                      {{ item.current|pct }}
+                    {% elif item.field in day_fields %}
+                      {{ item.current|num(0) }}
+                    {% elif item.field in count_fields %}
+                      {{ item.current|num(0) }}
+                    {% else %}
+                      {{ item.current|num(2) }}
+                    {% endif %}
+                  {% endif %}
+                </td>
+                <td style="padding:6px 0;">
+                  {% if item.prior is not none %}
+                    {% if item.field in money_fields %}
+                      {{ item.prior|money(summary.currency) }}
+                    {% elif item.field in pct_fields %}
+                      {{ item.prior|pct }}
+                    {% elif item.field in day_fields %}
+                      {{ item.prior|num(0) }}
+                    {% elif item.field in count_fields %}
+                      {{ item.prior|num(0) }}
+                    {% else %}
+                      {{ item.prior|num(2) }}
+                    {% endif %}
+                  {% endif %}
+                </td>
+                <td style="padding:6px 0;">
+                  {% if item.delta is not none %}
+                    {% if item.field in money_fields %}
+                      {{ item.delta|money(summary.currency) }}
+                    {% elif item.field in pct_fields %}
+                      {{ item.delta|pct }}
+                    {% elif item.field in day_fields %}
+                      {{ item.delta|num(0) }}
+                    {% elif item.field in count_fields %}
+                      {{ item.delta|num(0) }}
+                    {% else %}
+                      {{ item.delta|num(2) }}
+                    {% endif %}
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="small" style="margin-top:8px; color:var(--muted);">
+          No prior run is available for comparison.
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Observed variability (stored at run time)</h2>
+      <div class="small" style="margin-top:6px; color:var(--muted);">
+        Daily min/max/std values are stored for this run and shown without recomputation.
+      </div>
+      <table style="width:100%; border-collapse:collapse; margin-top:10px;">
+        <thead>
+          <tr>
+            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Series</th>
+            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Min (stored)</th>
+            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Max (stored)</th>
+            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Std dev (stored)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if summary.daily_income_min is not none and summary.daily_income_max is not none and summary.daily_income_std is not none %}
+            <tr>
+              <td style="padding:6px 0;">Daily income</td>
+              <td style="padding:6px 0;">{{ summary.daily_income_min|money(summary.currency) }}</td>
+              <td style="padding:6px 0;">{{ summary.daily_income_max|money(summary.currency) }}</td>
+              <td style="padding:6px 0;">{{ summary.daily_income_std|money(summary.currency) }}</td>
+            </tr>
+          {% endif %}
+          {% if summary.daily_expense_min is not none and summary.daily_expense_max is not none and summary.daily_expense_std is not none %}
+            <tr>
+              <td style="padding:6px 0;">Daily expense</td>
+              <td style="padding:6px 0;">{{ summary.daily_expense_min|money(summary.currency) }}</td>
+              <td style="padding:6px 0;">{{ summary.daily_expense_max|money(summary.currency) }}</td>
+              <td style="padding:6px 0;">{{ summary.daily_expense_std|money(summary.currency) }}</td>
+            </tr>
+          {% endif %}
+          {% if summary.daily_net_min is not none and summary.daily_net_max is not none and summary.daily_net_std is not none %}
+            <tr>
+              <td style="padding:6px 0;">Daily net</td>
+              <td style="padding:6px 0;">{{ summary.daily_net_min|money(summary.currency) }}</td>
+              <td style="padding:6px 0;">{{ summary.daily_net_max|money(summary.currency) }}</td>
+              <td style="padding:6px 0;">{{ summary.daily_net_std|money(summary.currency) }}</td>
+            </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Observed distribution (stored at run time)</h2>
+      {% if summary.concentration_top_n is not none and summary.concentration_expense_denominator is not none %}
+        <div class="small" style="margin-top:6px; color:var(--muted);">
+          Top {{ summary.concentration_top_n }} by share of total window expense (denominator: {{ summary.concentration_expense_denominator|money(summary.currency) }}).
+        </div>
+      {% endif %}
+      <div class="row" style="margin-top:10px;">
+        <div class="pill">Vendors (stored)</div>
+      </div>
+      {% if summary.concentration_top_vendors_expense and summary.concentration_top_vendors_expense|length > 0 %}
+        <table style="width:100%; border-collapse:collapse; margin-top:8px;">
+          <thead>
+            <tr>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Vendor</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Amount (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Share (stored)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for v in summary.concentration_top_vendors_expense %}
+              <tr>
+                <td style="padding:6px 0;">{{ v.counterparty }}</td>
+                <td style="padding:6px 0;">{{ v.amount|money(summary.currency) }}</td>
+                <td style="padding:6px 0;">{{ v.share|pct }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="small" style="margin-top:6px; color:var(--muted);">No stored vendor distribution rows for this run.</div>
+      {% endif %}
+
+      <div class="row" style="margin-top:12px;">
+        <div class="pill">Categories (stored)</div>
+      </div>
+      {% if summary.concentration_top_categories_expense and summary.concentration_top_categories_expense|length > 0 %}
+        <table style="width:100%; border-collapse:collapse; margin-top:8px;">
+          <thead>
+            <tr>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Category</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Amount (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Share (stored)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in summary.concentration_top_categories_expense %}
+              <tr>
+                <td style="padding:6px 0;">{{ c.category }}</td>
+                <td style="padding:6px 0;">{{ c.amount|money(summary.currency) }}</td>
+                <td style="padding:6px 0;">{{ c.share|pct }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="small" style="margin-top:6px; color:var(--muted);">No stored category distribution rows for this run.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Alerts (stored details)</h2>
+      <p class="sub" style="margin-top:6px;">Each alert shows stored fields and status records for this run.</p>
+      {% if not can_update %}
+        <div class="callout">Status updates are disabled because this is a historical run (read-only).</div>
+      {% endif %}
+      <div class="hr"></div>
+
+      {% if alerts|length == 0 %}
+        <div class="callout">
+          <strong>No alerts were triggered for this run.</strong> Some checks may not have been evaluated if required data was missing.
+        </div>
+      {% else %}
+        <div class="grid">
+          {% for a in alerts %}
+            <div class="alert alert-compact">
+              <div class="row" style="align-items:flex-start; gap:14px;">
+                <div class="badge {{ 'crit' if a.severity=='critical' else ('warn' if a.severity=='warning' else 'info') }}">{{ a.severity|upper }}</div>
+                <div class="meta">
+                  <p class="title">{{ a.title }}</p>
+                  <p class="why">{{ a.why }}</p>
+                  <div class="row" style="margin-top:6px; flex-wrap:wrap;">
+                    <div class="pill dim">Status (stored): {{ a._status|capitalize }}</div>
+                    {% if a._updated_at %}<div class="pill dim">Updated: {{ a._updated_at|humandt }}</div>{% endif %}
+                  </div>
+                  <div style="margin-top:8px;">
+                    <a class="link" href="/alerts/{{ a.id }}{{ run_qs if run_qs is defined else '' }}">Open</a>
+                  </div>
+                </div>
+              </div>
+
+              <details style="margin-top:10px;">
+                <summary style="cursor:pointer; font-weight:900;">Update status (stored)</summary>
+                <div style="height:8px;"></div>
+                <form method="post" action="/run/{{ run_id }}/feedback" class="status-form">
+                  <input type="hidden" name="alert_id" value="{{ a.id }}">
+                  <div class="field">
+                    <label>Status</label>
+                    <select name="status" {% if not can_update %}disabled{% endif %}>
+                      {% for opt in ['review','expected','actioned','ignore','snoozed'] %}
+                        <option value="{{ opt }}" {{ 'selected' if a._status==opt else '' }}>{{ opt|capitalize }}</option>
+                      {% endfor %}
+                    </select>
+                    <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
+                      Status is a stored workflow label. It does not change calculations or alert evaluation.
+                    </div>
+                    <div class="small" style="color:var(--muted); font-size:12px; margin-top:4px;">
+                      Changes are recorded when you click Record status.
+                    </div>
+                  </div>
+                  <div class="field" style="margin-top:10px;">
+                    <label>Note</label>
+                    <textarea name="note" class="note-textarea js-autosize" placeholder="Optional note (stored)" {% if not can_update %}disabled{% endif %}>{{ a._note }}</textarea>
+                  </div>
+                  <div class="row" style="margin-top:10px;">
+                    <button class="btn btn-primary" type="submit" {% if not can_update %}disabled{% else %}disabled{% endif %}>Record status</button>
+                  </div>
+                  <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+                    <div class="pill dim">Signal band (stored): {{ a.signal_strength }}</div>
+                    {% if a.suppressed and a.suppression_reason %}
+                      <div class="pill dim">Suppressed: {{ a.suppression_reason }}</div>
+                    {% elif a.suppressed %}
+                      <div class="pill dim">Suppressed</div>
+                    {% endif %}
+                    {% if a.quality_context and a.quality_context.score is not none %}
+                      <div class="pill dim">
+                        Data quality (stored): {{ '%.0f'|format(a.quality_context.score) }}/100
+                        {% if a.quality_context.threshold is not none %}
+                          (threshold {{ a.quality_context.threshold }})
+                        {% endif %}
+                      </div>
+                    {% endif %}
+                  </div>
+                </form>
+              </details>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+  {% if can_update %}
+    <script>
+      (function() {
+        var forms = document.querySelectorAll('.status-form');
+        if (!forms.length) return;
+        forms.forEach(function(form) {
+          var select = form.querySelector('select[name="status"]');
+          var note = form.querySelector('textarea[name="note"]');
+          var btn = form.querySelector('button[type="submit"]');
+          if (!select || !note || !btn) return;
+          var initialStatus = select.value;
+          var initialNote = note.value;
+          function toggle() {
+            var changed = (select.value !== initialStatus) || (note.value !== initialNote);
+            btn.disabled = !changed;
+          }
+          select.addEventListener('change', toggle);
+          note.addEventListener('input', toggle);
+          toggle();
+        });
+      })();
+    </script>
+  {% endif %}
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Why checks did not trigger</h2>
+      <p class="sub" style="margin-top:6px;">Per-rule non-trigger reasons for this run.</p>
+      <div class="hr"></div>
+      {% if summary.non_trigger_explainability and summary.non_trigger_explainability|length > 0 %}
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Rule</th>
+              <th>Reason</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in summary.non_trigger_explainability %}
+              <tr>
+                <td style="font-weight:800;">{{ r.rule_name }}</td>
+                <td>{{ r.reason|replace('_',' ')|title }}</td>
+                <td>
+                  {% if r.reason == "suppressed" %}
+                    {% if r.suppression_reason %}{{ r.suppression_reason }}{% endif %}
+                  {% elif r.reason == "missing_data" %}
+                    Missing: {{ r.missing_gates|join(", ") }}
+                  {% elif r.reason == "threshold_not_crossed" %}
+                    Threshold not crossed
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="small" style="color:var(--muted);">No non-trigger explanations are available for this run.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Data quality (stored)</h2>
+      <div class="small" style="color:var(--muted); margin-top:4px;">
+        Stored score, band, and coverage fields for this run.
+      </div>
+      <div class="hr"></div>
+      <div class="row">
+        <div class="pill">Score (stored): <strong>{{ '%.0f'|format(quality.score or 0) }}/100</strong></div>
+        {% if quality.band %}
+          <div class="pill dim">Band (stored): {{ quality.band }}</div>
+        {% endif %}
+        <div class="pill dim">Rows (stored): {{ quality.window_rows }} (window), {{ quality.total_rows }} (total)</div>
+        <div class="pill dim">Days covered (stored): {{ quality.window_days_covered }}</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Schema &amp; mapping (stored)</h2>
+      <div class="hr"></div>
+      {% if params and params.ledger_contract %}
+        <div class="row">
+          {% if params.ledger_contract.schema_version %}
+            <div class="pill">Schema: {{ params.ledger_contract.schema_version }}</div>
+          {% endif %}
+          {% if params.ledger_contract.adapter_version %}
+            <div class="pill dim">Adapter: {{ params.ledger_contract.adapter_version }}</div>
+          {% endif %}
+          {% if params.ledger_contract.row_count is not none %}
+            <div class="pill dim">Rows: {{ params.ledger_contract.row_count }}</div>
+          {% endif %}
+        </div>
+        {% if params.ledger_contract.columns_present %}
+          <div class="small" style="margin-top:10px; color:#334155;">
+            Columns present: {{ params.ledger_contract.columns_present|join(", ") }}
+          </div>
+        {% endif %}
+        {% if params.normalization and params.normalization.required_column_mapping %}
+          <div style="margin-top:10px;">
+            <div style="font-weight:900; margin-bottom:6px;">Required column mapping</div>
+            <table style="width:100%; border-collapse:collapse;">
+              <thead>
+                <tr>
+                  <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Canonical</th>
+                  <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for k, v in params.normalization.required_column_mapping.items() %}
+                  <tr>
+                    <td style="padding:6px 0;">{{ k }}</td>
+                    <td style="padding:6px 0;">{{ v if v is not none else '' }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+      {% else %}
+        <div class="small" style="color:var(--muted);">Schema metadata not available for this run.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Provenance (stored at run time)</h2>
+      <div class="hr"></div>
+      {% if params %}
+        <div class="row">
+          {% if params.config_version %}
+            <div class="pill">Config version (stored): {{ params.config_version }}</div>
+          {% endif %}
+          {% if params.migration_policy %}
+            <div class="pill dim">Migration policy (stored): {{ params.migration_policy }}</div>
+          {% endif %}
+        </div>
+        {% if params.source is defined and (params.source.provider or params.source.mode) %}
+          <div class="small" style="margin-top:8px; color:#334155;">
+            {% if params.source.provider %}Source (stored): {{ params.source.provider }}{% endif %}
+            {% if params.source.mode %} • Mode (stored): {{ params.source.mode }}{% endif %}
+          </div>
+        {% endif %}
+        {% if params.source is defined and (params.source.filename or params.source.ingest_id) %}
+          <div class="small" style="margin-top:6px; color:#334155;">
+            {% if params.source.filename %}Source filename (stored): {{ params.source.filename }}{% endif %}
+            {% if params.source.ingest_id %} • Ingest ID (stored): {{ params.source.ingest_id }}{% endif %}
+          </div>
+        {% endif %}
+      {% else %}
+        <div class="small" style="color:var(--muted);">Provenance metadata not available for this run.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  <details>
+    <summary style="cursor:pointer; font-weight:900;">Developer details (fields &amp; hashes)</summary>
+    <div style="height:10px;"></div>
+    <div class="card">
+      <div class="card-b">
+        <h2>Hashes (stored)</h2>
+        <div class="hr"></div>
+        {% if params %}
+          <div class="row">
+            {% if params.config_hash %}
+              <div class="pill dim">Config hash (stored): {{ params.config_hash }}</div>
+            {% endif %}
+            {% if params.code_hash %}
+              <div class="pill dim">Code hash (stored): {{ params.code_hash }}</div>
+            {% endif %}
+          </div>
+          <div class="row" style="margin-top:8px;">
+            {% if params.rule_inventory_hash %}
+              <div class="pill dim">Rule inventory hash (stored): {{ params.rule_inventory_hash }}</div>
+            {% endif %}
+            {% if params.rule_inventory_version %}
+              <div class="pill dim">Rule inventory version (stored): {{ params.rule_inventory_version }}</div>
+            {% endif %}
+          </div>
+          <div class="row" style="margin-top:8px;">
+            {% if params.artifact_ids is defined and params.artifact_ids.report_id %}
+              <div class="pill dim">Report ID (stored): {{ params.artifact_ids.report_id }}</div>
+            {% endif %}
+            {% if params.artifact_ids is defined and params.artifact_ids.snapshot_id %}
+              <div class="pill dim">Snapshot ID (stored): {{ params.artifact_ids.snapshot_id }}</div>
+            {% endif %}
+          </div>
+        {% else %}
+          <div class="small" style="color:var(--muted);">Hash metadata not available for this run.</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div style="height:14px;"></div>
+
+    <div class="card">
+      <div class="card-b">
+        <h2>Evidence index (stored at run time)</h2>
+        <div class="small" style="margin-top:6px; color:var(--muted);">
+          Each panel below lists the stored fields shown on this page for this run.
+        </div>
+        <div class="hr"></div>
+        <table style="width:100%; border-collapse:collapse;">
+          <thead>
+            <tr>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Panel</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Stored fields</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Run header</td>
+              <td style="padding:6px 0;">
+                <span class="mono">run_id</span>,
+                <span class="mono">created_at</span>,
+                <span class="mono">filename</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">KPIs</td>
+              <td style="padding:6px 0;">
+                <span class="mono">summary.current_cash</span>,
+                <span class="mono">summary.runway_days</span>,
+                <span class="mono">summary.recent_income</span>,
+                <span class="mono">summary.recent_expense</span>,
+                <span class="mono">summary.income_change</span>,
+                <span class="mono">summary.expense_change</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Window totals</td>
+              <td style="padding:6px 0;">
+                <span class="mono">summary.window_start_date</span>,
+                <span class="mono">summary.end_date</span>,
+                <span class="mono">summary.window_income</span>,
+                <span class="mono">summary.window_expense</span>,
+                <span class="mono">summary.window_net_change</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Coverage</td>
+              <td style="padding:6px 0;">
+                <span class="mono">summary.window_transaction_count</span>,
+                <span class="mono">summary.window_days_observed</span>,
+                <span class="mono">summary.window_days_span_inclusive</span>,
+                <span class="mono">summary.window_days_with_income</span>,
+                <span class="mono">summary.window_days_with_expense</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Observed distribution</td>
+              <td style="padding:6px 0;">
+                <span class="mono">summary.concentration_top_n</span>,
+                <span class="mono">summary.concentration_expense_denominator</span>,
+                <span class="mono">summary.concentration_top_vendors_expense</span>,
+                <span class="mono">summary.concentration_top_categories_expense</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Run‑to‑run change ledger</td>
+              <td style="padding:6px 0;">
+                <span class="mono">summary.run_to_run</span>
+                (prior_run_id, prior_created_at, fields[])
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Observed variability</td>
+              <td style="padding:6px 0;">
+                <span class="mono">summary.daily_income_min</span>,
+                <span class="mono">summary.daily_income_max</span>,
+                <span class="mono">summary.daily_income_std</span>,
+                <span class="mono">summary.daily_expense_min</span>,
+                <span class="mono">summary.daily_expense_max</span>,
+                <span class="mono">summary.daily_expense_std</span>,
+                <span class="mono">summary.daily_net_min</span>,
+                <span class="mono">summary.daily_net_max</span>,
+                <span class="mono">summary.daily_net_std</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Alerts</td>
+              <td style="padding:6px 0;">
+                <span class="mono">alerts[]</span>
+                (stored alerts with status and evidence)
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Non‑trigger reasons</td>
+              <td style="padding:6px 0;">
+                <span class="mono">summary.non_trigger_explainability</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Data quality</td>
+              <td style="padding:6px 0;">
+                <span class="mono">quality.score</span>,
+                <span class="mono">quality.band</span>,
+                <span class="mono">quality.window_rows</span>,
+                <span class="mono">quality.total_rows</span>,
+                <span class="mono">quality.window_days_covered</span>,
+                <span class="mono">quality.flags</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Schema &amp; mapping</td>
+              <td style="padding:6px 0;">
+                <span class="mono">params.ledger_contract</span>,
+                <span class="mono">params.normalization.required_column_mapping</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Audit metadata</td>
+              <td style="padding:6px 0;">
+                <span class="mono">params.config_version</span>,
+                <span class="mono">params.config_hash</span>,
+                <span class="mono">params.code_hash</span>,
+                <span class="mono">params.rule_inventory_hash</span>,
+                <span class="mono">params.source.ingest_id</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0; font-weight:800;">Normalization log</td>
+              <td style="padding:6px 0;">
+                <span class="mono">params.normalization</span>
+                (rows_in/out, duplicates, renames)
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div style="height:14px;"></div>
+
+    <div class="card">
+      <div class="card-b">
+        <h2>Audit metadata (stored)</h2>
+        <div class="hr"></div>
+        {% if params %}
+          <div class="row">
+            {% if params.config_version %}
+              <div class="pill">Config version: {{ params.config_version }}</div>
+            {% endif %}
+            {% if params.config_hash %}
+              <div class="pill dim">Config hash: {{ params.config_hash }}</div>
+            {% endif %}
+          </div>
+          <div class="row" style="margin-top:8px;">
+            {% if params.code_hash %}
+              <div class="pill dim">Code hash: {{ params.code_hash }}</div>
+            {% endif %}
+            {% if params.rule_inventory_hash %}
+              <div class="pill dim">Rule inventory hash: {{ params.rule_inventory_hash }}</div>
+            {% endif %}
+          </div>
+          {% if params.source is defined and params.source.ingest_id %}
+            <div class="small" style="margin-top:8px; color:#334155;">
+              Ingest ID: {{ params.source.ingest_id }}
+            </div>
+          {% endif %}
+        {% else %}
+          <div class="small" style="color:var(--muted);">Audit metadata not available for this run.</div>
+        {% endif %}
+      </div>
+    </div>
+  </details>
+
+  <div style="height:14px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Normalization log (stored)</h2>
+      <div class="hr"></div>
+      {% if params and params.normalization %}
+        <div class="row">
+          {% if params.normalization.rows_input is not none %}
+            <div class="pill">Rows in: {{ params.normalization.rows_input }}</div>
+          {% endif %}
+          {% if params.normalization.rows_output is not none %}
+            <div class="pill dim">Rows out: {{ params.normalization.rows_output }}</div>
+          {% endif %}
+          {% if params.normalization.rows_dropped_missing_date is not none %}
+            <div class="pill dim">Dropped (missing date): {{ params.normalization.rows_dropped_missing_date }}</div>
+          {% endif %}
+        </div>
+        <div class="row" style="margin-top:8px;">
+          {% if params.normalization.duplicates_dropped is not none %}
+            <div class="pill dim">Duplicates dropped: {{ params.normalization.duplicates_dropped }}</div>
+          {% endif %}
+          {% if params.normalization.amount_parse_invalid is not none %}
+            <div class="pill dim">Amount parse invalid: {{ params.normalization.amount_parse_invalid }}</div>
+          {% endif %}
+        </div>
+        {% if params.normalization.applied_renames %}
+          <div style="margin-top:10px;">
+            <div style="font-weight:900; margin-bottom:6px;">Applied renames</div>
+            <table style="width:100%; border-collapse:collapse;">
+              <thead>
+                <tr>
+                  <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">From</th>
+                  <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">To</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for r in params.normalization.applied_renames %}
+                  <tr>
+                    <td style="padding:6px 0;">{{ r.from }}</td>
+                    <td style="padding:6px 0;">{{ r.to }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+        {% if params.normalization.duplicate_basis %}
+          <div class="small" style="margin-top:10px; color:#334155;">
+            Duplicate basis: {{ params.normalization.duplicate_basis|join(", ") }}
+          </div>
+        {% endif %}
+      {% else %}
+        <div class="small" style="color:var(--muted);">Normalization data not available for this run.</div>
+      {% endif %}
+    </div>
+  </div>
+    </div>
+  </details>
+{% endblock %}

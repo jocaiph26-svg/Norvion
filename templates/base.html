@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or "SME Early-Warning" }}</title>
+
+  <!-- Icons -->
+  <link rel="icon" href="/static/favicon.ico">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+
+<body>
+  {# Defensive: never assume request/run_qs are present #}
+  {% set path = request.url.path if request is defined and request.url is defined else '' %}
+  {% set rq_raw = run_qs if run_qs is defined and run_qs else '' %}
+  {# Ensure rq is either "" or begins with "?" #}
+  {% set rq = rq_raw if (rq_raw and rq_raw.startswith('?')) else ('?' ~ rq_raw) if rq_raw else '' %}
+  {% set run_link_id = active_run_id if active_run_id else (latest_run_id if latest_run_id else None) %}
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div>SME Early-Warning</div>
+        <small>Audit-first monitoring</small>
+        {% if access_role is defined %}
+          <details class="access-context">
+            <summary>Access context</summary>
+            <div class="access-context-body">
+              <div class="pill dim">Role: <span class="mono">{{ access_role }}</span></div>
+              {% if access_tenant %}<div class="pill dim">Tenant: <span class="mono">{{ access_tenant }}</span></div>{% endif %}
+              {% if access_actor %}<div class="pill dim">Actor: <span class="mono">{{ access_actor }}</span></div>{% endif %}
+            </div>
+          </details>
+        {% endif %}
+      </div>
+
+      <nav class="sidebar-nav">
+        <a href="/dashboard{{ rq }}"
+           class="{{ 'active' if path in ['/', '/home', '/dashboard'] else '' }}">
+          Home
+        </a>
+        {% if run_link_id %}
+          <a href="{{ '/run/' ~ run_link_id ~ rq }}"
+             class="{{ 'active' if path.startswith('/run/') else '' }}">
+            Run Detail
+          </a>
+        {% else %}
+          <span class="nav-disabled" aria-disabled="true">Run Detail</span>
+          <small class="nav-helper">Upload data to create the first run.</small>
+        {% endif %}
+        <a href="/alerts{{ rq }}"
+           class="{{ 'active' if path.startswith('/alerts') else '' }}">
+          Alerts
+        </a>
+        <a href="/insights{{ rq }}"
+           class="{{ 'active' if path == '/insights' else '' }}">
+          Summary
+        </a>
+        <a href="/history{{ rq }}"
+           class="{{ 'active' if path.startswith('/history') else '' }}">
+          History
+        </a>
+        <a href="/settings{{ rq }}"
+           class="{{ 'active' if path.startswith('/settings') else '' }}">
+          Settings (read-only)
+        </a>
+        <a href="/integrations{{ rq }}"
+           class="{{ 'active' if path.startswith('/integrations') else '' }}">
+          Integrations (disabled)
+        </a>
+        <a href="/digest/weekly{{ rq }}"
+           class="{{ 'active' if path.startswith('/insights/weekly') else '' }}">
+          Weekly Summary
+        </a>
+      </nav>
+
+    </aside>
+
+    <div class="app-main">
+      <header class="topbar">
+        <div class="topbar-inner">
+          <div class="topbar-left">
+            &nbsp;
+          </div>
+          <div class="topbar-actions">
+            <a class="btn btn-primary" href="/upload">Upload CSV</a>
+          </div>
+        </div>
+      </header>
+
+      <main class="container">
+        {% block content %}{% endblock %}
+
+        <div class="footer">
+          <div class="hr"></div>
+          <div>
+            <strong>Disclaimer:</strong>
+            Software-generated summaries from uploaded data (stored at run time).
+            Not financial advice. Verify with a qualified professional.
+          </div>
+          <div>
+            Design goal:
+            <strong>deterministic checks + stored evidence + audit trail</strong>
+            (no black-box claims).
+          </div>
+          {% if access_role is defined %}
+          <div>
+            Access context:
+            <strong class="mono">{{ access_role }}</strong>
+            {% if access_actor %} • actor: <span class="mono">{{ access_actor }}</span>{% endif %}
+            {% if access_tenant %} • tenant: <span class="mono">{{ access_tenant }}</span>{% endif %}
+          </div>
+          {% endif %}
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

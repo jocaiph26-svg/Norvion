@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="header">
+    <div>
+      <h1 class="h1">Settings</h1>
+      <p class="sub">Tune thresholds to match the business. This reduces alert fatigue and increases trust.</p>
+      {% if settings_scope is defined %}
+        <p class="sub" style="margin-top:6px;">
+          Scope: <span class="mono">{{ settings_scope }}</span>
+          • hash: <span class="mono">{{ settings_hash }}</span>
+          {% if s.config_version %} • config: <span class="mono">{{ s.config_version }}</span>{% endif %}
+          {% if settings_updated_at %} • updated: <span class="mono">{{ settings_updated_at|humandt }}</span>{% endif %}
+        </p>
+        {% if settings_scope == "global_fallback" %}
+          <p class="sub" style="margin-top:4px;">
+            This tenant is using global defaults. Saving will create a tenant-only override.
+          </p>
+        {% endif %}
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-b">
+      <form method="post" action="/settings">
+        <div class="grid cols-2">
+          <div class="field">
+            <label>Currency</label>
+            <input class="input" name="currency" value="{{ s.currency }}">
+          </div>
+          <div class="field">
+            <label>Starting cash</label>
+            <input class="input" type="number" step="0.01" name="starting_cash" value="{{ s.starting_cash }}">
+          </div>
+
+          <div class="field">
+            <label>Window days</label>
+            <input class="input" type="number" name="window_days" value="{{ s.window_days }}">
+          </div>
+          <div class="field">
+            <label>Burn days</label>
+            <input class="input" type="number" name="burn_days" value="{{ s.burn_days }}">
+          </div>
+
+          <div class="field">
+            <label>Low cash buffer days</label>
+            <input class="input" type="number" name="low_cash_buffer_days" value="{{ s.low_cash_buffer_days }}">
+          </div>
+          <div class="field">
+            <label>Expense spike threshold (fraction)</label>
+            <input class="input" type="number" step="0.01" name="expense_spike_pct" value="{{ s.expense_spike_pct }}">
+          </div>
+
+          <div class="field">
+            <label>Revenue drop threshold (fraction)</label>
+            <input class="input" type="number" step="0.01" name="revenue_drop_pct" value="{{ s.revenue_drop_pct }}">
+          </div>
+          <div class="field">
+            <label>Concentration threshold (fraction)</label>
+            <input class="input" type="number" step="0.01" name="concentration_threshold" value="{{ s.concentration_threshold }}">
+          </div>
+
+          <div class="field">
+            <label>Large transaction sensitivity (sigma)</label>
+            <input class="input" type="number" step="0.1" name="large_txn_sigma" value="{{ s.large_txn_sigma }}">
+          </div>
+          <div class="field">
+            <label>Recurring expense min hits</label>
+            <input class="input" type="number" name="recurring_min_hits" value="{{ s.recurring_min_hits }}">
+          </div>
+
+          <div class="field">
+            <label>Overdue grace days</label>
+            <input class="input" type="number" name="overdue_days" value="{{ s.overdue_days }}">
+          </div>
+          <div class="field">
+            <label>Recent compare days</label>
+            <input class="input" type="number" name="recent_compare_days" value="{{ s.recent_compare_days }}">
+          </div>
+
+          <div class="field">
+            <label>Demo mode</label>
+            <select name="demo_mode">
+              <option value="True" {{ 'selected' if s.demo_mode else '' }}>True</option>
+              <option value="False" {{ 'selected' if not s.demo_mode else '' }}>False</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Enable integrations scaffold</label>
+            <select name="enable_integrations_scaffold">
+              <option value="True" {{ 'selected' if s.enable_integrations_scaffold else '' }}>True</option>
+              <option value="False" {{ 'selected' if not s.enable_integrations_scaffold else '' }}>False</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:16px;">
+          <button class="btn btn-primary" type="submit">Save settings</button>
+          <a class="btn" href="/dashboard">Back</a>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}

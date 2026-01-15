@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block content %}
+  {# Preserve run context on fallback links where appropriate #}
+  {% set rq = run_qs if run_qs is defined else '' %}
+
+  <div class="header">
+    <div>
+      <h1 class="h1">{{ error_title or "Something went wrong" }}</h1>
+      <p class="sub">
+        {{ error_message or "The app is still running. This is usually caused by an unexpected input or missing data." }}
+      </p>
+      {% if schema_help and schema_help.note %}
+        <p class="sub" style="margin-top:8px;">{{ schema_help.note }}</p>
+      {% endif %}
+    </div>
+
+    <div class="row">
+      {% if actions %}
+        {% for a in actions %}
+          {% if a and a.href is defined and a.label is defined and a.href and a.label %}
+            <a class="btn {{ 'primary' if loop.first else 'btn-ghost' }}" href="{{ a.href }}">{{ a.label }}</a>
+          {% endif %}
+        {% endfor %}
+      {% else %}
+        <a class="btn primary" href="/upload">Back to Upload</a>
+        <a class="btn btn-ghost" href="/dashboard{{ rq }}">Home</a>
+        <a class="btn btn-ghost" href="/history{{ rq }}">History</a>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if schema_help %}
+    <div class="card">
+      <div class="card-b">
+        <div class="callout">
+          <strong>Required CSV columns</strong>
+          <div style="margin-top:8px; color: rgba(2,6,23,0.75);">
+            Your CSV must include at least <span class="mono">date</span> and <span class="mono">amount</span>.
+            Optional columns improve the quality of the insights.
+          </div>
+
+          {% if schema_help.missing_required and schema_help.missing_required|length > 0 %}
+            <div style="margin-top:12px;">
+              <strong>Missing:</strong>
+              {% for c in schema_help.missing_required %}
+                <span class="badge" style="margin-left:6px;">{{ c }}</span>
+              {% endfor %}
+            </div>
+          {% endif %}
+
+          {% if schema_help.example_header_row %}
+            <div style="margin-top:12px;">
+              <strong>Example header row</strong>
+              <div class="mono" style="margin-top:6px; padding:10px; border-radius:12px; background: rgba(2,6,23,0.03); border: 1px solid rgba(2,6,23,0.08);">
+                {{ schema_help.example_header_row }}
+              </div>
+            </div>
+          {% endif %}
+        </div>
+
+        <div class="hr"></div>
+
+        <div style="color: rgba(2,6,23,0.75);">
+          <strong>Tip:</strong> If your export uses different column names (e.g. <span class="mono">transaction_date</span> or <span class="mono">value</span>),
+          rename them to match the expected columns and try again.
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if show_details %}
+    {% if error_details %}
+      <div class="card">
+        <div class="card-b">
+          <details>
+            <summary style="cursor:pointer; font-weight:900;">Show technical details</summary>
+            <div style="margin-top:12px;" class="callout">
+              <div class="mono" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">
+                {{ error_details }}
+              </div>
+            </div>
+          </details>
+        </div>
+      </div>
+    {% endif %}
+  {% endif %}
+{% endblock %}

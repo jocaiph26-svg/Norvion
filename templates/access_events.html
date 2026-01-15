@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="header">
+    <div>
+      <h1 class="h1">Access events</h1>
+      <p class="sub">Recorded access events for this entity only.</p>
+      <p class="sub" style="margin-top:6px;">
+        Entity (stored): <span class="mono">{{ tenant_id }}</span>
+      </p>
+    </div>
+    <div class="row">
+      <a class="btn" href="/dashboard{{ run_qs if run_qs is defined else '' }}">Home</a>
+    </div>
+  </div>
+
+  <details>
+    <summary style="cursor:pointer; font-weight:900;">Technical / audit details (stored)</summary>
+    <div style="height:10px;"></div>
+    <div class="card">
+      <div class="card-b">
+        <h2>Recorded access events</h2>
+        <p class="sub" style="margin-top:6px;">Each row reflects a stored access event with no inference.</p>
+        <div class="hr"></div>
+        {% if events|length == 0 %}
+          <div class="callout">No recorded access events for this entity.</div>
+        {% else %}
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Entity</th>
+                <th>Actor</th>
+                <th>Role</th>
+                <th>Action</th>
+                <th>Resource</th>
+                <th>Allowed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for e in events %}
+                <tr>
+                  <td class="mono">{{ e.created_at|humandt }}</td>
+                  <td class="mono">{{ e.tenant_id }}</td>
+                  <td class="mono">{{ e.actor_id }}</td>
+                  <td>{{ e.role }}</td>
+                  <td>{{ e.action }}</td>
+                  <td>{{ e.resource }}</td>
+                  <td>{{ "true" if e.allowed else "false" }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% endif %}
+      </div>
+    </div>
+  </details>
+{% endblock %}

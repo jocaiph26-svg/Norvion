@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block content %}
+{% set run_link_id = active_run_id if active_run_id else (latest_run_id if latest_run_id else None) %}
+<div class="header">
+  <h1 class="h1">Integrations (disabled)</h1>
+  <p class="sub">Stored integration records for this tenant. No external calls occur.</p>
+</div>
+
+<div class="card">
+  <div class="card-b">
+    <p style="margin:0 0 16px 0;">
+      Integrations are disabled; records shown here are stored only. Writes are disabled in audit mode.
+    </p>
+    <div class="hr"></div>
+    
+    {% if integrations|length == 0 %}
+      <div class="empty">
+        <div class="empty-title">No integration records stored</div>
+        <div class="empty-sub">No integration records are stored for this tenant.</div>
+      </div>
+    {% else %}
+      <table style="width:100%; border-collapse:collapse;">
+        <thead>
+          <tr>
+            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Provider</th>
+            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Status (stored)</th>
+            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Created (stored)</th>
+            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Updated (stored)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for integration in integrations %}
+            <tr>
+              <td style="padding:6px 0;">{{ integration.provider }}</td>
+              <td style="padding:6px 0;">{{ integration.status }}</td>
+              <td style="padding:6px 0;">{{ integration.created_at|humandt if integration.created_at }}</td>
+              <td style="padding:6px 0;">{{ integration.updated_at|humandt if integration.updated_at }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </div>
+</div>
+
+<details style="margin-top:16px;">
+  <summary style="cursor:pointer; font-weight:900;">Technical / audit details (stored)</summary>
+  <div style="height:10px;"></div>
+  <div class="card">
+    <div class="card-b">
+      <h2>Stored integration records (all fields)</h2>
+      <div class="hr"></div>
+      {% if integrations|length == 0 %}
+        <div class="callout">No integration records are stored for this tenant.</div>
+      {% else %}
+        <table style="width:100%; border-collapse:collapse;">
+          <thead>
+            <tr>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Provider</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Status (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Tenant (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Created (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Updated (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Metadata (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Secret ref (stored)</th>
+              <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Record ID</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for integration in integrations %}
+              <tr>
+                <td style="padding:6px 0;">{{ integration.provider }}</td>
+                <td style="padding:6px 0;">{{ integration.status }}</td>
+                <td style="padding:6px 0;"><span class="mono">{{ integration.tenant_id if integration.tenant_id }}</span></td>
+                <td style="padding:6px 0;">{{ integration.created_at|humandt if integration.created_at }}</td>
+                <td style="padding:6px 0;">{{ integration.updated_at|humandt if integration.updated_at }}</td>
+                <td style="padding:6px 0;"><span class="mono">{{ integration.metadata_json if integration.metadata_json }}</span></td>
+                <td style="padding:6px 0;"><span class="mono">{{ integration.secret_ref if integration.secret_ref }}</span></td>
+                <td style="padding:6px 0;"><span class="mono">{{ integration.id }}</span></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="height:12px;"></div>
+  <div class="card">
+    <div class="card-b">
+      <p class="sub" style="margin-top:6px;">Writes are disabled in audit mode.</p>
+      <ul style="margin:0; padding-left:20px;">
+        <li><a class="link" href="/api/ui/dashboard">/api/ui/dashboard</a></li>
+        {% if run_link_id %}
+          <li><a class="link" href="/api/ui/run/{{ run_link_id }}">/api/ui/run/{{ run_link_id }}</a></li>
+        {% endif %}
+        <li><a class="link" href="/api/ui/history">/api/ui/history</a></li>
+        <li><a class="link" href="/api/ui/alerts">/api/ui/alerts</a></li>
+        <li><a class="link" href="/api/ui/access/events">/api/ui/access/events</a></li>
+        <li><a class="link" href="/settings{{ run_qs if run_qs is defined else '' }}">Settings (read-only)</a></li>
+      </ul>
+    </div>
+  </div>
+</details>
+{% endblock %}

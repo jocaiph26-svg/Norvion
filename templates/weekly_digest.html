@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="header">
+    <div>
+      <h1 class="h1">Weekly Summary</h1>
+      <p class="sub">Weekly view of recorded alert events (stored audit trail summary).</p>
+      <p class="sub" style="margin-top:6px;">
+        Weekly summaries require multiple runs across weeks. If only one week of data exists,
+        this page may mirror Summary.
+      </p>
+    </div>
+    <div class="row">
+      <a class="btn" href="/alerts{{ run_qs if run_qs is defined else '' }}">Alerts</a>
+      <a class="btn" href="/insights{{ run_qs if run_qs is defined else '' }}">Summary</a>
+    </div>
+  </div>
+
+  <div class="grid cols-2">
+    <div class="card"><div class="card-b">
+      <h2>Open / quieted alerts</h2>
+      <div class="hr"></div>
+      {% if unresolved|length == 0 %}
+        <div class="callout">No active alerts.</div>
+      {% else %}
+        <table class="table">
+          <thead><tr><th>Alert</th><th>Status</th><th>Updated</th></tr></thead>
+          <tbody>
+            {% for a in unresolved %}
+            <tr>
+              <td class="mono"><a class="link" href="/alerts/{{ a.alert_id }}{{ run_qs if run_qs is defined else '' }}">{{ a.alert_id|replace('_',' ')|title }}</a></td>
+              <td style="font-weight:800;">{{ a.status|title }}</td>
+              <td class="mono">{{ a.updated_at|humandt }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div></div>
+
+    <div class="card"><div class="card-b">
+      <h2>Recent activity (7 days)</h2>
+      <div class="hr"></div>
+      {% if new_events|length + reopened_events|length + worsened_events|length + resolved_events|length == 0 %}
+        <div class="callout">No events logged in the last 7 days.</div>
+      {% else %}
+        <div class="pills">
+          <div class="pill">New: {{ new_events|length }}</div>
+          <div class="pill">Reopened: {{ reopened_events|length }}</div>
+          <div class="pill">Worsened: {{ worsened_events|length }}</div>
+          <div class="pill">Resolved: {{ resolved_events|length }}</div>
+        </div>
+        <div class="row" style="margin-top:8px; gap:8px; align-items:center;">
+          <label style="font-weight:800; font-size:13px;">
+            <input type="checkbox" class="js-condense-toggle" checked>
+            Condense to latest per alert
+          </label>
+        </div>
+        <div class="hr"></div>
+        <table class="table" data-weekly-table="events">
+          <thead><tr><th>Time</th><th>Alert</th><th>Event</th></tr></thead>
+          <tbody>
+            {% for e in (new_events + reopened_events + worsened_events + resolved_events)[:50] %}
+            <tr data-alert-id="{{ e.alert_id }}">
+              <td class="mono">{{ e.created_at|humandt }}</td>
+              <td class="mono"><a class="link" href="/alerts/{{ e.alert_id }}{{ run_qs if run_qs is defined else '' }}">{{ e.alert_id|replace('_',' ')|title }}</a></td>
+              <td style="font-weight:800;">{{ e.event_type|replace('_',' ')|title }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div></div>
+  </div>
+{% endblock %}

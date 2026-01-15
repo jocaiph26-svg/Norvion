@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+{% set run_link_id = active_run_id if active_run_id else (latest_run_id if latest_run_id else None) %}
+<div class="header">
+  <h1 class="h1">Observations (disabled)</h1>
+  <p class="sub">This page is disabled in audit mode.</p>
+</div>
+
+{% if empty %}
+<div class="card">
+  <div class="card-b">
+    <div class="empty">
+      <div class="empty-title">No data yet</div>
+      <div class="empty-sub">Upload a CSV first. Use the Upload CSV button in the top bar.</div>
+    </div>
+  </div>
+</div>
+{% else %}
+  <div class="card">
+    <div class="card-b">
+      <div class="callout">No stored observations are available on this page.</div>
+      <p class="sub" style="margin-top:6px;">
+        This view is intentionally disabled to avoid non‑observational content.
+      </p>
+      <p class="sub" style="margin-top:6px;">Writes are disabled in audit mode.</p>
+    </div>
+  </div>
+{% endif %}
+
+<div class="card" style="margin-top:16px;">
+  <div class="card-b">
+    <h3 style="margin:0 0 12px 0;">API endpoints available (read-only)</h3>
+    <ul style="margin:0; padding-left:20px;">
+      <li><a class="link" href="/api/ui/dashboard">/api/ui/dashboard</a></li>
+      {% if run_link_id %}
+        <li><a class="link" href="/api/ui/run/{{ run_link_id }}">/api/ui/run/{{ run_link_id }}</a></li>
+      {% endif %}
+      <li><a class="link" href="/api/ui/history">/api/ui/history</a></li>
+      <li><a class="link" href="/api/ui/alerts">/api/ui/alerts</a></li>
+      <li><a class="link" href="/api/ui/access/events">/api/ui/access/events</a></li>
+    </ul>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,3698 @@
+from __future__ import annotations
+# ----------------------------
+# Internal: Deterministic rule inventory (versioned)
+# ----------------------------
+RULE_INVENTORY = [
+    {
+        "rule": "Cash runway tight",
+        "id": "runway_tight",
+        "threshold": "< low_cash_buffer_days setting",
+        "data_gates": ["daily burn data", "current cash"],
+        "suppression_reasons": ["manual ignore", "expected seasonal"],
+        "metric": "runway_days",
+        "version": "v1.0",
+    },
+    {
+        "rule": "Expense spike",
+        "id": "expense_spike",
+        "threshold": "> expense_spike_pct vs prior window",
+        "data_gates": ["expense data", "window size >= 2"],
+        "suppression_reasons": ["missing data", "manual ignore"],
+        "metric": "expense_change",
+        "version": "v1.0",
+    },
+    {
+        "rule": "Revenue drop",
+        "id": "revenue_drop",
+        "threshold": "< -revenue_drop_pct vs prior window",
+        "data_gates": ["revenue data", "window size >= 2"],
+        "suppression_reasons": ["missing data", "manual ignore"],
+        "metric": "income_change",
+        "version": "v1.0",
+    },
+    {
+        "rule": "Expense concentration",
+        "id": "expense_concentration",
+        "threshold": "> concentration_threshold for single vendor/category",
+        "data_gates": ["vendor/category data"],
+        "suppression_reasons": ["manual ignore"],
+        "metric": "max_vendor_or_category_share",
+        "version": "v1.0",
+    },
+    {
+        "rule": "Large expense transaction",
+        "id": "large_expense",
+        "threshold": "> mean + (large_txn_sigma * std)",
+        "data_gates": ["expense distribution stats"],
+        "suppression_reasons": ["manual ignore", "known seasonal"],
+        "metric": "largest_expense_amount",
+        "version": "v1.0",
+    },
+    {
+        "rule": "Overdue receivables",
+        "id": "overdue_receivables",
+        "threshold": ">= overdue_days setting",
+        "data_gates": ["invoice_id", "due_date", "status columns"],
+        "suppression_reasons": ["missing invoice data"],
+        "metric": "overdue_ar_total",
+        "version": "v1.0",
+    },
+    {
+        "rule": "Overdue payables",
+        "id": "overdue_payables",
+        "threshold": ">= overdue_days setting",
+        "data_gates": ["invoice_id", "due_date", "status columns"],
+        "suppression_reasons": ["missing invoice data"],
+        "metric": "overdue_ap_total",
+        "version": "v1.0",
+    },
+]
+
+# Add this somewhere after RULE_INVENTORY definition, around line 103:
+def _rule_inventory_hash() -> str:
+    """Deterministic hash of current rule inventory for auditability."""
+    canonical = json.dumps(RULE_INVENTORY, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+import io
+import json
+import sqlite3
+import hashlib
+import logging
+import os
+import math
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, List, Tuple, Optional
+from pathlib import Path
+from contextlib import contextmanager
+
+import numpy as np
+import pandas as pd
+from fastapi import FastAPI, File, UploadFile, Form, Query
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, PlainTextResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
+from jinja2 import TemplateNotFound
+from starlette.requests import Request
+from starlette.middleware.sessions import SessionMiddleware
+
+BASE_DIR = Path(__file__).resolve().parent
+DEMO_DATA_DIR = BASE_DIR / "demo_data"
+
+# ----------------------------
+# Canonical comparison semantics (C1.1 / C1.2)
+# ----------------------------
+COMPARISON_KIND_ADJACENT_WINDOWS = "adjacent_windows_same_length"
+ALERT_ID_VERSION = "v1.0"
+
+def window_comparison_label(days: int) -> str:
+    d = int(days)
+    return f"most recent {d} days vs immediately preceding {d} days"
+
+# ----------------------------
+# App constants
+# ----------------------------
+APP_TITLE = "SME Early Warning"
+# Allow tests (and power-users) to run against an isolated database without
+# changing application code. In normal use, this remains the bundled app.db.
+_DB_PATH_ENV = os.getenv("SME_EW_DB_PATH", "app.db")
+DB_PATH = _DB_PATH_ENV if os.path.isabs(_DB_PATH_ENV) else str(BASE_DIR / _DB_PATH_ENV)
+MAX_UPLOAD_BYTES = 6 * 1024 * 1024  # 6MB
+MAX_UPLOAD_ROWS = 100_000 # demo safety : prevent pathological CSVs from exhausting memory/CPU
+SQLITE_TIMEOUT_S = 30
+MAX_WEBHOOK_BYTES = 1 * 1024 * 1024  # 1MB demo cap (webhook payloads should be small)
+
+# ----------------------------
+# Ledger + provenance constants
+# ----------------------------
+LEDGER_SCHEMA_VERSION = "ledger_v1"
+ADAPTER_VERSION = "adapter_v1"
+# Allowed normalized columns (strict contract)
+LEDGER_V1_COLUMNS = [
+    "date",
+    "amount",
+    "type",
+    "category",
+    "counterparty",
+    "description",
+    "invoice_id",
+    "due_date",
+    "status",
+    "direction",
+]
+
+# Rule safety caps (demo-safe; prevents pathological regex payloads)
+MAX_RULE_TEXT_LEN = 200
+MAX_RULES_RETURN = 2000
+
+# ----------------------------
+# Logging (demo-safe)
+# ----------------------------
+logger = logging.getLogger("sme_early_warning")
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+# ----------------------------
+# FastAPI + templates
+# ----------------------------
+app = FastAPI(title=APP_TITLE)
+# Session middleware is used only to persist selected run context across pages.
+# This uses Starlette's built-in session support (no new dependencies).
+_SESSION_SECRET = os.getenv('SME_EW_SESSION_SECRET', 'CHANGE_ME_DEMO_SESSION_SECRET')
+if _SESSION_SECRET == "CHANGE_ME_DEMO_SESSION_SECRET":
+    logger.warning(
+        "SME_EW_SESSION_SECRET is using the demo default. Set an env var for safer sessions."
+    )
+def _parse_bool(v: Any, default: bool = False) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return default
+    s = str(v).strip().lower()
+    if s in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    return default
+
+def _clamp_float(x: Any, lo: float, hi: float, default: float) -> float:
+    try:
+        v = float(x)
+    except Exception:
+        return float(default)
+    if not math.isfinite(v):
+        return float(default)
+    return float(min(max(v, lo), hi))
+
+def _clamp_int(x: Any, lo: int, hi: int, default: int) -> int:
+    try:
+        v = int(x)
+    except Exception:
+        return int(default)
+    return int(min(max(v, lo), hi))
+
+_demo_mode_env = _parse_bool(os.getenv("SME_EW_DEMO_MODE", "true"), default=True)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=_SESSION_SECRET,
+    same_site="lax",
+    https_only=(not _demo_mode_env),
+    max_age=60 * 60 * 24 * 14,  # 14 days
+)
+
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+STATIC_DIR = BASE_DIR / "static"
+if STATIC_DIR.exists() and STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+else:
+    # Demo-hardening: don't crash if static/ is missing in a minimal environment.
+    logger.warning("Static directory %s not found; continuing without /static mount", STATIC_DIR)
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    """Global exception handler.
+
+    - Tries to render `error.html` if present (nice for demos).
+    - Falls back to plain text to avoid "exception in exception handler".
+    """
+    logger.exception("Unhandled exception: %s", exc)
+    try:
+        return templates.TemplateResponse(
+            "error.html",
+            {
+                "request": request,
+                "title": "Something went wrong",
+                "error_title": "Something went wrong",
+                "error_message": "The app is still running. This was caused by an unexpected input or missing data. Try again, or upload a new CSV.",
+                "schema_help": None,
+                "actions": [
+                    {"label": "Back to Upload", "href": "/upload"},
+                    {"label": "Home", "href": "/dashboard"},
+                    {"label": "History", "href": "/history"},
+                ],
+                # Demo safety: don't leak stack traces / raw exceptions in the UI.
+                "show_details": False,
+                "error_details": None,
+            },
+            status_code=500,
+        )
+    except TemplateNotFound:
+        return PlainTextResponse("Internal Server Error", status_code=500)
+    except Exception:
+        return PlainTextResponse("Internal Server Error", status_code=500)
+
+
+# ----------------------------
+# DB helpers (WAL + busy timeout to reduce locks)
+# ----------------------------
+def _connect_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=SQLITE_TIMEOUT_S, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    # Pragmas that matter for demo stability
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    return conn
+
+
+@contextmanager
+def db_conn() -> sqlite3.Connection:
+    conn = _connect_db()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def safe_json_loads(s: Any, default: Any):
+    try:
+        if s is None:
+            return default
+        if isinstance(s, (dict, list)):
+            return s
+        return json.loads(s)
+    except Exception:
+        return default
+
+
+def _table_has_column(conn: sqlite3.Connection, table: str, col: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(str(r["name"]) == col for r in rows)
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return [str(r["name"]) for r in rows]
+    except Exception:
+        return []
+
+
+def _insert_run_row(
+    conn: sqlite3.Connection,
+    created_at: str,
+    filename: str,
+    params_json: str,
+    summary_json: str,
+    alerts_json: str,
+    quality_json: str,
+    file_sha256: Optional[str] = None,
+    settings_hash: Optional[str] = None,
+) -> int:
+    """
+    Backward-compatible INSERT into runs.
+    - Some deployments may not have newer columns (file_sha256/settings_hash).
+    - Build the INSERT dynamically using existing schema columns.
+    Returns inserted run_id.
+    """
+    cols = set(_table_columns(conn, "runs"))
+    base = {
+        "created_at": created_at,
+        "filename": filename,
+        "params_json": params_json,
+        "summary_json": summary_json,
+        "alerts_json": alerts_json,
+        "quality_json": quality_json,
+    }
+    if "file_sha256" in cols and file_sha256 is not None:
+        base["file_sha256"] = file_sha256
+    if "settings_hash" in cols and settings_hash is not None:
+        base["settings_hash"] = settings_hash
+
+    insert_cols = [
+        k
+        for k in [
+            "created_at",
+            "filename",
+            "params_json",
+            "summary_json",
+            "alerts_json",
+            "quality_json",
+            "file_sha256",
+            "settings_hash",
+        ]
+        if k in base
+    ]
+    placeholders = ", ".join(["?"] * len(insert_cols))
+    sql = f"INSERT INTO runs ({', '.join(insert_cols)}) VALUES ({placeholders})"
+    conn.execute(sql, tuple(base[c] for c in insert_cols))
+    row = conn.execute("SELECT last_insert_rowid() AS id").fetchone()
+    return int(row["id"]) if row and row["id"] is not None else 0
+
+
+def db_init() -> None:
+    with db_conn() as conn:
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            params_json TEXT NOT NULL,
+            summary_json TEXT NOT NULL,
+            alerts_json TEXT NOT NULL,
+            quality_json TEXT NOT NULL
+        )
+        """
+        )
+
+        # Lightweight migration(s)
+        if not _table_has_column(conn, "runs", "file_sha256"):
+            try:
+                cur.execute("ALTER TABLE runs ADD COLUMN file_sha256 TEXT")
+            except Exception:
+                # If migration fails, continue; demo still works.
+                pass
+
+        if not _table_has_column(conn, "runs", "settings_hash"):
+            try:
+                cur.execute("ALTER TABLE runs ADD COLUMN settings_hash TEXT")
+            except Exception:
+                pass
+
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            updated_at TEXT NOT NULL,
+            settings_json TEXT NOT NULL
+        )
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS alert_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            alert_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            note TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(run_id, alert_id),
+            FOREIGN KEY(run_id) REFERENCES runs(id)
+        )
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS alert_state (
+            alert_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'review',
+            note TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            last_seen_run_id INTEGER,
+            last_score REAL NOT NULL DEFAULT 0.0
+        )
+        """
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS alert_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            run_id INTEGER,
+            alert_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            status TEXT,
+            note TEXT
+        )
+        """
+        )
+
+        # Integrations scaffolding (no keys required; safe placeholders)
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS integrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            is_enabled INTEGER NOT NULL DEFAULT 0,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        )
+        """
+        )
+        
+        # ---- Integrations migration: sync state fields (demo-safe scaffold) ----
+        if not _table_has_column(conn, "integrations", "last_sync_at"):
+            try:
+                cur.execute("ALTER TABLE integrations ADD COLUMN last_sync_at TEXT")
+            except Exception:
+                pass
+        if not _table_has_column(conn, "integrations", "last_sync_status"):
+            try:
+                cur.execute("ALTER TABLE integrations ADD COLUMN last_sync_status TEXT")
+            except Exception:
+                pass
+        if not _table_has_column(conn, "integrations", "last_sync_note"):
+            try:
+                cur.execute("ALTER TABLE integrations ADD COLUMN last_sync_note TEXT")
+            except Exception:
+                pass
+
+        # ---- Deterministic categorisation rules ----
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS vendor_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vendor TEXT NOT NULL,
+            match_type TEXT NOT NULL DEFAULT 'equals', -- equals|contains|startswith
+            category TEXT NOT NULL,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 100,
+            note TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+        """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vendor_rules_vendor ON vendor_rules(vendor)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vendor_rules_priority ON vendor_rules(priority)"
+        )
+
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS description_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern TEXT NOT NULL,
+            match_type TEXT NOT NULL DEFAULT 'contains', -- contains|startswith|equals|regex (regex optional by setting)
+            category TEXT NOT NULL,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 100,
+            note TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+        """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_description_rules_priority ON description_rules(priority)"
+        )
+
+        # Indexes that make the demo snappy
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_alert_events_alert_id ON alert_events(alert_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_alert_events_created_at ON alert_events(created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_alert_state_updated_at ON alert_state(updated_at)")
+
+        # Seed settings
+        row = cur.execute("SELECT COUNT(*) AS c FROM settings").fetchone()
+        if int(row["c"]) == 0:
+            defaults = {
+                "currency": "AUD",
+                "starting_cash": 25000.0,
+                "window_days": 90,
+                "burn_days": 30,
+                "low_cash_buffer_days": 21,
+                "expense_spike_pct": 0.35,
+                "revenue_drop_pct": 0.25,
+                "concentration_threshold": 0.45,
+                "large_txn_sigma": 3.0,
+                "recurring_min_hits": 3,
+                "overdue_days": 7,
+                "recent_compare_days": 30,
+
+                # Demo-grade product toggles (no external services required)
+                "demo_mode": True,
+                "enable_integrations_scaffold": True,
+                "webhook_secret": "CHANGE_ME_DEMO_SECRET",
+
+                # Categorisation controls
+                "enable_categorisation_rules": True,
+                # Regex rules are disabled by default to avoid ReDoS-style patterns in demo mode.
+                "enable_regex_rules": False,
+            }
+            cur.execute(
+                "INSERT INTO settings (id, updated_at, settings_json) VALUES (1, ?, ?)",
+                (datetime.utcnow().isoformat(), json.dumps(defaults)),
+            )
+
+        # Seed integrations rows if missing
+        existing = {str(r["provider"]) for r in cur.execute("SELECT provider FROM integrations").fetchall()}
+        for provider in ["xero", "quickbooks", "myob", "stripe", "shopify", "square", "bank_csv"]:
+            if provider not in existing:
+                cur.execute(
+                    "INSERT INTO integrations (provider, is_enabled, config_json, updated_at) VALUES (?, 0, '{}', ?)",
+                    (provider, datetime.utcnow().isoformat()),
+                )
+
+        conn.commit()
+
+
+@app.on_event("startup")
+def _startup():
+    db_init()
+    logger.info("Startup complete. DB initialised at %s", DB_PATH)
+
+
+def read_settings() -> Dict[str, Any]:
+    with db_conn() as conn:
+        row = conn.execute("SELECT settings_json FROM settings WHERE id = 1").fetchone()
+        return safe_json_loads(row["settings_json"] if row else "{}", {})
+
+
+def write_settings(s: Dict[str, Any]) -> None:
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE settings SET updated_at = ?, settings_json = ? WHERE id = 1",
+            (datetime.utcnow().isoformat(), json.dumps(s)),
+        )
+        conn.commit()
+
+
+# ----------------------------
+# Run context helpers (selected run persistence)
+# ----------------------------
+def _get_latest_run_id() -> Optional[int]:
+    with db_conn() as conn:
+        row = conn.execute("SELECT id FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+    return int(row["id"]) if row else None
+
+
+def _get_active_run_id(request: Request, run_id_param: Optional[int] = None) -> Optional[int]:
+    """Return the active run id for this request.
+
+    Priority:
+      1) explicit ?run_id= (also persists to session)
+      2) session-stored active_run_id
+      3) None (caller may fall back to latest)
+    """
+    if run_id_param is not None:
+        try:
+            rid = int(run_id_param)
+            request.session["active_run_id"] = rid
+            return rid
+        except Exception:
+            pass
+
+    try:
+        rid = request.session.get("active_run_id")
+        return int(rid) if rid is not None else None
+    except Exception:
+        return None
+
+
+def _clear_active_run(request: Request) -> None:
+    try:
+        request.session.pop("active_run_id", None)
+    except Exception:
+        pass
+
+
+def _run_snapshot(run_id: int) -> Optional[Dict[str, Any]]:
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT id, created_at, filename, summary_json, alerts_json, quality_json FROM runs WHERE id = ?",
+            (int(run_id),),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row["id"]),
+        "created_at": str(row["created_at"]),
+        "filename": str(row["filename"]),
+        "summary": safe_json_loads(row["summary_json"], {}) or {},
+        "alerts": safe_json_loads(row["alerts_json"], []) or [],
+        "quality": safe_json_loads(row["quality_json"], {}) or {},
+    }
+
+
+def _active_and_latest(request: Request, run_id_param: Optional[int] = None) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Return (active_run_snapshot, latest_run_snapshot)."""
+    latest_id = _get_latest_run_id()
+    latest = _run_snapshot(latest_id) if latest_id is not None else None
+
+    active_id = _get_active_run_id(request, run_id_param)
+    if active_id is None:
+        return latest, latest
+
+    active = _run_snapshot(active_id)
+    if active is None:
+        # Stale session or bad param; fall back safely.
+        _clear_active_run(request)
+        return latest, latest
+
+    return active, latest
+
+
+def _run_qs(active: Optional[Dict[str, Any]], latest: Optional[Dict[str, Any]]) -> str:
+    """Querystring used to preserve run context in links."""
+    try:
+        if active and latest and int(active["id"]) != int(latest["id"]):
+            return f"?run_id={int(active['id'])}"
+    except Exception:
+        pass
+    return ""
+
+# ----------------------------
+# Formatting helpers
+# ----------------------------
+def money(x: float, ccy: str) -> str:
+    """Human money formatting.
+
+    Demo defaults to 0 decimal places to avoid raw float noise. Internally we
+    keep full precision for deterministic checks; formatting is for display only.
+    """
+    try:
+        x = float(x)
+    except Exception:
+        return f"{ccy} —"
+    if not math.isfinite(x):
+        return f"{ccy} —"
+    return f"{ccy} {x:,.0f}"
+
+
+def pct(x: float) -> str:
+    """Format a fraction as a percentage for UI display."""
+    if x is None:
+        return "—"
+    try:
+        p = float(x) * 100.0
+    except Exception:
+        return "—"
+    if not math.isfinite(p):
+        return "—"
+    if p == 0:
+        return "0%"
+    if abs(p) < 1.0:
+        return f"{p:.1f}%"
+    return f"{p:.0f}%"
+    
+
+def num(x: float, decimals: int = 2) -> str:
+    """Generic numeric formatter to prevent trust-killing float spam."""
+    try:
+        x = float(x)
+    except Exception:
+        return "—"
+    if not math.isfinite(x):
+        return "—"
+    if abs(x) >= 1000:
+        return f"{x:,.{max(0, int(decimals))}f}".rstrip("0").rstrip(".")
+    return f"{x:.{max(0, int(decimals))}f}".rstrip("0").rstrip(".")
+
+
+templates.env.filters["money"] = lambda v, ccy="AUD": money(v, ccy)
+templates.env.filters["pct"] = lambda v: pct(v)
+templates.env.filters["num"] = lambda v, d=2: num(v, int(d))
+
+
+def days(x: float | int) -> str:
+    try:
+        return f"{float(x):.0f} days"
+    except Exception:
+        return "—"
+
+
+templates.env.filters["days"] = lambda v: days(v)
+
+
+def human_dt(s: str) -> str:
+    if not s:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(s)
+
+
+templates.env.filters["humandt"] = lambda v: human_dt(str(v or ""))
+
+
+def _render_or_fallback(
+    request: Request,
+    template_name: str,
+    context: Dict[str, Any],
+    fallback_title: str,
+    fallback_html: str,
+) -> HTMLResponse:
+    """Render a template if it exists; otherwise return inline HTML.
+
+    This prevents a 'TemplateNotFound' from nuking a demo.
+    """
+    try:
+        return templates.TemplateResponse(template_name, context)
+    except TemplateNotFound:
+        html = f"""
+        <!doctype html>
+        <html><head><meta charset="utf-8"><title>{fallback_title}</title></head>
+        <body style="font-family: system-ui, -apple-system, Segoe UI, Roboto; padding: 24px; max-width: 980px; margin: 0 auto;">
+          <h1 style="margin:0 0 12px 0;">{fallback_title}</h1>
+          {fallback_html}
+          <hr style="margin:24px 0;">
+          <p style="color:#666;">(Fallback page rendered because <code>{template_name}</code> is missing.)</p>
+        </body></html>
+        """
+        return HTMLResponse(html, status_code=200)
+
+
+# ----------------------------
+# CSV Normalisation
+# ----------------------------
+def normalise_csv(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    rename_map = {
+        "transaction_date": "date",
+        "txn_date": "date",
+        "posted_date": "date",
+        "value": "amount",
+        "total": "amount",
+        "merchant": "counterparty",
+        "vendor": "counterparty",
+        "supplier": "counterparty",
+        "payee": "counterparty",
+        "customer": "counterparty",
+        "details": "description",
+        "memo": "description",
+        "note": "description",
+        "invoice": "invoice_id",
+        "invoice_number": "invoice_id",
+    }
+    for k, v in rename_map.items():
+        if k in df.columns and v not in df.columns:
+            df.rename(columns={k: v}, inplace=True)
+
+    if "date" not in df.columns:
+        raise ValueError("CSV missing required column: date")
+    if "amount" not in df.columns:
+        raise ValueError("CSV missing required column: amount")
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
+    df = df.dropna(subset=["date"])
+
+    # Robust amount parsing for common exports: handle thousands separators like "1,234.56".
+    # (Locale-specific decimal commas are not supported; keep behavior deterministic.)
+    try:
+        amt = df["amount"].astype(str).str.strip()
+        amt = amt.str.replace(",", "", regex=False)
+        df["amount"] = pd.to_numeric(amt, errors="coerce").fillna(0.0).astype(float)
+    except Exception:
+        df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0).astype(float)
+
+    if "type" not in df.columns:
+        df["type"] = np.where(df["amount"] < 0, "expense", "income")
+    df["type"] = df["type"].astype(str).str.lower().str.strip()
+    df.loc[~df["type"].isin(["income", "expense"]), "type"] = np.where(
+        df["amount"] < 0, "expense", "income"
+    )
+
+    if "category" not in df.columns:
+        df["category"] = "Uncategorised"
+    df["category"] = df["category"].astype(str).str.strip()
+    df.loc[df["category"].eq("") | df["category"].isna(), "category"] = "Uncategorised"
+
+    if "counterparty" not in df.columns:
+        df["counterparty"] = "Unknown"
+    df["counterparty"] = df["counterparty"].astype(str).str.strip()
+    df.loc[df["counterparty"].eq("") | df["counterparty"].isna(), "counterparty"] = "Unknown"
+
+    if "description" not in df.columns:
+        df["description"] = ""
+    df["description"] = df["description"].astype(str)
+
+    if "invoice_id" in df.columns:
+        df["invoice_id"] = df["invoice_id"].astype(str).str.strip()
+    if "due_date" in df.columns:
+        df["due_date"] = pd.to_datetime(df["due_date"], errors="coerce").dt.normalize()
+    if "status" in df.columns:
+        df["status"] = df["status"].astype(str).str.lower().str.strip()
+    if "direction" in df.columns:
+        df["direction"] = df["direction"].astype(str).str.upper().str.strip()
+
+    df["abs_amount"] = df["amount"].abs()
+    return df
+
+
+# ----------------------------
+# Ledger contract + provenance helpers
+# ----------------------------
+def _ledger_contract_report(df: pd.DataFrame) -> Dict[str, Any]:
+    """Strict, deterministic report: what columns we have, what we dropped/kept.
+
+    This does NOT mutate the dataframe. Used for provenance/audit only.
+    """
+    cols = [str(c) for c in df.columns]
+    allowed = set(LEDGER_V1_COLUMNS + ["abs_amount"])
+    extra = sorted([c for c in cols if c not in allowed])
+    missing_core = sorted([c for c in ["date", "amount", "type", "category", "counterparty", "description"] if c not in cols])
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "adapter_version": ADAPTER_VERSION,
+        "columns_present": cols,
+        "missing_core": missing_core,
+        "extra_columns": extra,
+        "row_count": int(len(df)),
+    }
+
+
+def _safe_text(x: Any, max_len: int = 200) -> str:
+    s = str(x or "")
+    s = s.replace("\x00", "")
+    if len(s) > max_len:
+        s = s[:max_len]
+    return s
+
+
+def _safe_match_type(v: Any, allowed: set, default: str) -> str:
+    s = str(v or "").strip().lower()
+    return s if s in allowed else default
+
+
+# ----------------------------
+# Deterministic categorisation rules engine
+# ----------------------------
+def _load_vendor_rules(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, vendor, match_type, category, is_enabled, priority, note, updated_at
+        FROM vendor_rules
+        WHERE is_enabled = 1
+        ORDER BY priority ASC, id ASC
+        LIMIT ?
+        """,
+        (MAX_RULES_RETURN,),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "id": int(r["id"]),
+                "vendor": str(r["vendor"] or ""),
+                "match_type": str(r["match_type"] or "equals").lower(),
+                "category": str(r["category"] or "Uncategorised"),
+                "priority": int(r["priority"] or 100),
+                "note": str(r["note"] or ""),
+                "updated_at": str(r["updated_at"] or ""),
+            }
+        )
+    return out
+
+
+def _load_description_rules(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, pattern, match_type, category, is_enabled, priority, note, updated_at
+        FROM description_rules
+        WHERE is_enabled = 1
+        ORDER BY priority ASC, id ASC
+        LIMIT ?
+        """,
+        (MAX_RULES_RETURN,),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "id": int(r["id"]),
+                "pattern": str(r["pattern"] or ""),
+                "match_type": str(r["match_type"] or "contains").lower(),
+                "category": str(r["category"] or "Uncategorised"),
+                "priority": int(r["priority"] or 100),
+                "note": str(r["note"] or ""),
+                "updated_at": str(r["updated_at"] or ""),
+            }
+        )
+    return out
+
+
+def _apply_rule_match_series(series: pd.Series, needle: str, match_type: str, enable_regex: bool) -> pd.Series:
+    """Return boolean mask. Deterministic and guarded."""
+    hay = series.fillna("").astype(str)
+    n = _safe_text(needle, MAX_RULE_TEXT_LEN)
+    if not n:
+        return pd.Series([False] * len(hay), index=hay.index)
+
+    mt = match_type
+    if mt == "equals":
+        return hay.str.strip().str.lower().eq(n.strip().lower())
+    if mt == "startswith":
+        return hay.str.strip().str.lower().str.startswith(n.strip().lower())
+    if mt == "contains":
+        # plain substring match (regex=False => safe)
+        return hay.str.lower().str.contains(n.lower(), regex=False)
+    if mt == "regex":
+        if not enable_regex:
+            return pd.Series([False] * len(hay), index=hay.index)
+        # Guard: cap pattern length and compile safely
+        pat = n
+        try:
+            re.compile(pat)
+        except Exception:
+            return pd.Series([False] * len(hay), index=hay.index)
+        return hay.str.contains(pat, regex=True, na=False)
+    return pd.Series([False] * len(hay), index=hay.index)
+
+
+def apply_deterministic_categorisation(
+    df: pd.DataFrame,
+    settings: Dict[str, Any],
+    conn: sqlite3.Connection,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Apply deterministic rules to fill category for Uncategorised rows.
+
+    Priority order:
+      1) vendor_rules
+      2) description_rules
+      3) keep existing category
+      4) fallback 'Uncategorised'
+
+    Returns (df, report) where report is safe to store in params_json.
+    """
+    enabled = bool(_parse_bool(settings.get("enable_categorisation_rules", True), default=True))
+    if not enabled:
+        return df, {"enabled": False, "applied": 0, "by_source": {}, "notes": ["categorisation disabled"]}
+
+    enable_regex = bool(_parse_bool(settings.get("enable_regex_rules", False), default=False))
+    out = df.copy()
+    if "category" not in out.columns:
+        out["category"] = "Uncategorised"
+    if "counterparty" not in out.columns:
+        out["counterparty"] = "Unknown"
+    if "description" not in out.columns:
+        out["description"] = ""
+
+    # Only attempt to categorise rows that are currently Uncategorised (or blank)
+    cat = out["category"].fillna("").astype(str).str.strip()
+    unc_mask = cat.eq("") | cat.str.lower().eq("uncategorised") | cat.str.lower().eq("uncategorized")
+    if not bool(unc_mask.any()):
+        return out, {"enabled": True, "applied": 0, "by_source": {}, "notes": ["nothing uncategorised"]}
+
+    vendor_rules = _load_vendor_rules(conn)
+    desc_rules = _load_description_rules(conn)
+
+    applied = 0
+    by_source = {"vendor_rule": 0, "description_rule": 0}
+    audit_samples: List[Dict[str, Any]] = []
+
+    # vendor rules
+    if vendor_rules:
+        cp = out.loc[unc_mask, "counterparty"].fillna("").astype(str)
+        for rule in vendor_rules:
+            mask = _apply_rule_match_series(cp, rule["vendor"], rule["match_type"], enable_regex=False)
+            if not bool(mask.any()):
+                continue
+            idx = mask[mask].index
+            out.loc[idx, "category"] = rule["category"]
+            applied_now = int(len(idx))
+            applied += applied_now
+            by_source["vendor_rule"] += applied_now
+            if len(audit_samples) < 30:
+                audit_samples.append(
+                    {
+                        "source": "vendor_rule",
+                        "rule_id": int(rule["id"]),
+                        "match_type": rule["match_type"],
+                        "category": rule["category"],
+                        "example_counterparty": str(out.loc[idx[0], "counterparty"]) if len(idx) else "",
+                    }
+                )
+            # refresh unc_mask after applying
+            cat2 = out["category"].fillna("").astype(str).str.strip()
+            unc_mask = cat2.eq("") | cat2.str.lower().eq("uncategorised") | cat2.str.lower().eq("uncategorized")
+            if not bool(unc_mask.any()):
+                break
+
+    # description rules
+    if bool(unc_mask.any()) and desc_rules:
+        desc = out.loc[unc_mask, "description"].fillna("").astype(str)
+        for rule in desc_rules:
+            mt = rule["match_type"]
+            mt_allowed = {"equals", "startswith", "contains", "regex"}
+            mt = mt if mt in mt_allowed else "contains"
+            mask = _apply_rule_match_series(desc, rule["pattern"], mt, enable_regex=enable_regex)
+            if not bool(mask.any()):
+                continue
+            idx = mask[mask].index
+            out.loc[idx, "category"] = rule["category"]
+            applied_now = int(len(idx))
+            applied += applied_now
+            by_source["description_rule"] += applied_now
+            if len(audit_samples) < 30:
+                audit_samples.append(
+                    {
+                        "source": "description_rule",
+                        "rule_id": int(rule["id"]),
+                        "match_type": mt,
+                        "category": rule["category"],
+                        "example_description": _safe_text(str(out.loc[idx[0], "description"]), 120) if len(idx) else "",
+                    }
+                )
+            cat2 = out["category"].fillna("").astype(str).str.strip()
+            unc_mask = cat2.eq("") | cat2.str.lower().eq("uncategorised") | cat2.str.lower().eq("uncategorized")
+            if not bool(unc_mask.any()):
+                break
+
+    report = {
+        "enabled": True,
+        "applied": int(applied),
+        "by_source": by_source,
+        "vendor_rules_count": int(len(vendor_rules)),
+        "description_rules_count": int(len(desc_rules)),
+        "enable_regex_rules": bool(enable_regex),
+        "samples": audit_samples,
+    }
+    return out, report
+
+
+# ----------------------------
+# Alert model
+# ----------------------------
+@dataclass
+class Alert:
+    id: str
+    severity: str
+    title: str
+    why: str
+
+    # Deprecated: retained for backward compatibility only
+    suggested_actions: List[str]
+
+    # Canonical human-facing, non-advisory review material
+    review_considerations: List[str]
+
+    # Reserved for future structured / API-driven review context
+    api_considerations: Dict[str, Any]
+
+    signal_strength: str
+    evidence: Dict[str, Any]
+
+
+
+def signal_strength_from_gap(gap: float) -> str:
+    if gap >= 0.6:
+        return "High"
+    if gap >= 0.3:
+        return "Medium"
+    return "Low"
+
+def severity_from_gap(gap: float) -> str:
+    """
+    Deterministic severity mapping.
+    Severity reflects magnitude of deviation beyond threshold,
+    not alert type.
+    """
+    if gap >= 0.6:
+        return "critical"
+    if gap >= 0.3:
+        return "warning"
+    return "info"
+
+
+def rel_change(new: float, old: float) -> float:
+    if old <= 1e-9:
+        return 0.0 if new <= 1e-9 else 1.0
+    return (new - old) / old
+
+
+# ----------------------------
+# C1.3 — Narrative builders (deterministic)
+# ----------------------------
+def _comparison_narrative(
+    comparison_label: str,
+    recent_value: float,
+    previous_value: float,
+    currency: str,
+    delta: float,
+) -> str:
+    """
+    Narrative text must be derivable entirely from evidence fields.
+    """
+    return (
+        f"For {comparison_label}, values were {money(recent_value, currency)} vs "
+        f"{money(previous_value, currency)} ({pct(delta)} change)."
+    )
+
+
+# ----------------------------
+# C2.2 — Standardised explainability structure
+# ----------------------------
+def build_explainability(
+    *,
+    check_name: str,
+    comparison_label: str | None,
+    evidence: Dict[str, Any],
+    fired: bool,
+    threshold: Any | None = None,
+) -> Dict[str, Any]:
+    """
+    Canonical explainability payload.
+    This structure is identical for all alerts.
+    """
+    return {
+        "check": check_name,
+        "fired": bool(fired),
+        "comparison": comparison_label,
+        "threshold": threshold,
+        "evidence_keys": sorted(list(evidence.keys())),
+    }
+
+
+# ----------------------------
+# C2.1 — Non-trigger explainability
+# ----------------------------
+def non_trigger_reason(
+    *,
+    check_name: str,
+    missing_gates: List[str],
+    threshold_crossed: bool,
+) -> Dict[str, Any]:
+    """
+    Deterministic explanation for why a check did not fire.
+    """
+    if missing_gates:
+        return {
+            "check": check_name,
+            "fired": False,
+            "reason": "missing_data",
+            "missing_gates": list(missing_gates),
+        }
+    if not threshold_crossed:
+        return {
+            "check": check_name,
+            "fired": False,
+            "reason": "threshold_not_crossed",
+        }
+    return {
+        "check": check_name,
+        "fired": False,
+        "reason": "unknown",
+    }
+
+# Add this near the data_quality() function, around line 1100:
+def quality_band(score: float) -> str:
+    """Map quality score to letter grade."""
+    if score >= 85:
+        return "A"
+    if score >= 70:
+        return "B"
+    if score >= 50:
+        return "C"
+    return "D"
+
+# ----------------------------
+# Data quality
+# ----------------------------
+def data_quality(df: pd.DataFrame, window_df: pd.DataFrame) -> Dict[str, Any]:
+    total = len(df)
+    wtotal = len(window_df)
+
+    uncategorised_share = float((window_df["category"] == "Uncategorised").mean()) if wtotal else 1.0
+    unknown_vendor_share = float((window_df["counterparty"] == "Unknown").mean()) if wtotal else 1.0
+
+    if wtotal:
+        days_span = (window_df["date"].max() - window_df["date"].min()).days + 1
+    else:
+        days_span = 0
+
+    dup_cols = [c for c in ["date", "amount", "type", "category", "counterparty"] if c in window_df.columns]
+    dup_rate = float(window_df.duplicated(subset=dup_cols).mean()) if wtotal else 0.0
+
+    has_invoices = int(("invoice_id" in df.columns) and ("due_date" in df.columns) and ("status" in df.columns))
+    has_direction = int("direction" in df.columns)
+
+    score = 100.0
+    score -= 25.0 * min(max(uncategorised_share, 0), 1)
+    score -= 20.0 * min(max(unknown_vendor_share, 0), 1)
+    score -= 15.0 * min(max(dup_rate, 0), 1)
+
+    if days_span < 30:
+        score -= 15.0
+    elif days_span < 60:
+        score -= 8.0
+
+    score += 5.0 * has_invoices
+    score += 2.0 * has_direction
+    score = min(max(score, 0.0), 100.0)
+
+    flags: List[str] = []
+    if uncategorised_share > 0.35:
+        flags.append("Many transactions are uncategorised — categorisation improves insight quality.")
+    if unknown_vendor_share > 0.25:
+        flags.append("Many transactions have unknown counterparties — vendor mapping improves concentration checks.")
+    if dup_rate > 0.10:
+        flags.append("High duplicate-like rows detected — check exports for repeated entries.")
+    if days_span < 30:
+        flags.append("Short date coverage — insights are limited until more history is available.")
+    if not has_invoices:
+        flags.append("Invoice fields not detected — overdue checks will be skipped.")
+
+    return {
+        "score": float(score),
+        "total_rows": int(total),
+        "window_rows": int(wtotal),
+        "window_days_covered": int(days_span),
+        "uncategorised_share": float(uncategorised_share),
+        "unknown_vendor_share": float(unknown_vendor_share),
+        "dup_rate": float(dup_rate),
+        "flags": flags,
+        "score": float(score),
+        "band": quality_band(score),  
+    }
+
+
+# ----------------------------
+# Alert scoring (used for memory logic)
+# ----------------------------
+def alert_score(alert_dict: Dict[str, Any]) -> float:
+    ev = alert_dict.get("evidence") or {}
+    if isinstance(ev, dict) and "gap" in ev:
+        try:
+            gap_val = float(ev.get("gap", 0.0))
+            if gap_val > 0:
+                return gap_val
+        except (ValueError, TypeError):
+            pass
+
+    alert_id = str(alert_dict.get("id", ""))
+
+    if "runway" in alert_id and "runway_days" in ev and "threshold_days" in ev:
+        try:
+            runway = float(ev.get("runway_days", 0))
+            threshold = float(ev.get("threshold_days", 1))
+            if threshold > 0:
+                return max(0.0, (threshold - runway) / threshold)
+        except (ValueError, TypeError):
+            pass
+
+    if "expense_spike" in alert_id and "expense_change" in ev:
+        try:
+            return abs(float(ev.get("expense_change", 0)))
+        except (ValueError, TypeError):
+            pass
+
+    if "revenue_drop" in alert_id and "income_change" in ev:
+        try:
+            return abs(float(ev.get("income_change", 0)))
+        except (ValueError, TypeError):
+            pass
+
+    if "concentration" in alert_id and "share" in ev:
+        try:
+            return float(ev.get("share", 0))
+        except (ValueError, TypeError):
+            pass
+
+    ss = str(alert_dict.get("signal_strength", "")).strip().lower()
+    if ss == "high":
+        return 0.6
+    if ss == "medium":
+        return 0.3
+    if ss == "low":
+        return 0.15
+    return 0.15
+
+
+# ----------------------------
+# Core analysis
+# ----------------------------
+def build_summary_and_alerts(
+    df: pd.DataFrame, s: Dict[str, Any]
+) -> Tuple[Dict[str, Any], List[Alert], Dict[str, Any]]:
+    currency = str(s.get("currency", "AUD")).upper().strip() or "AUD"
+    starting_cash = float(s.get("starting_cash", 25000.0))
+    window_days = int(s.get("window_days", 90))
+    burn_days = int(s.get("burn_days", 30))
+
+    low_cash_buffer_days = float(s.get("low_cash_buffer_days", 21))
+    expense_spike_pct = float(s.get("expense_spike_pct", 0.35))
+    revenue_drop_pct = float(s.get("revenue_drop_pct", 0.25))
+    concentration_threshold = float(s.get("concentration_threshold", 0.45))
+
+    large_sigma = float(s.get("large_txn_sigma", 3.0))
+    recurring_min_hits = int(s.get("recurring_min_hits", 3))
+    overdue_days = int(s.get("overdue_days", 7))
+    recent_compare_days = int(s.get("recent_compare_days", 30))
+
+    end_date = df["date"].max()
+    start_date = end_date - pd.Timedelta(days=window_days - 1)
+    w = df[(df["date"] >= start_date) & (df["date"] <= end_date)].copy()
+    if w.empty:
+        raise ValueError("No rows in selected window. Increase window_days or check date formatting.")
+
+    daily = (
+        w.groupby(["date", "type"])["abs_amount"]
+        .sum()
+        .unstack(fill_value=0.0)
+        .rename(columns={"income": "income", "expense": "expense"})
+        .sort_index()
+    )
+    if "income" not in daily.columns:
+        daily["income"] = 0.0
+    if "expense" not in daily.columns:
+        daily["expense"] = 0.0
+    daily["net"] = daily["income"] - daily["expense"]
+    daily["cash"] = starting_cash + daily["net"].cumsum()
+
+    burn_start = end_date - pd.Timedelta(days=burn_days - 1)
+    burn_slice = daily.loc[(daily.index >= burn_start) & (daily.index <= end_date)]
+    avg_daily_burn = float(burn_slice["expense"].mean()) if len(burn_slice) else float(daily["expense"].mean())
+    avg_daily_burn = max(avg_daily_burn, 1e-6)
+
+    current_cash = float(daily["cash"].iloc[-1])
+    runway_days = float(current_cash / avg_daily_burn)
+
+    # Compare most-recent vs immediately preceding windows
+    recent_days = recent_compare_days if window_days >= 2 * recent_compare_days else max(7, window_days // 2)
+
+    recent_start = end_date - pd.Timedelta(days=recent_days - 1)
+    prev_end = recent_start - pd.Timedelta(days=1)
+    prev_start = prev_end - pd.Timedelta(days=recent_days - 1)
+
+    recent = w[(w["date"] >= recent_start) & (w["date"] <= end_date)]
+    prev = w[(w["date"] >= prev_start) & (w["date"] <= prev_end)]
+
+    recent_income = float(recent.loc[recent["type"] == "income", "abs_amount"].sum())
+    recent_expense = float(recent.loc[recent["type"] == "expense", "abs_amount"].sum())
+    prev_income = float(prev.loc[prev["type"] == "income", "abs_amount"].sum()) if len(prev) else recent_income
+    prev_expense = float(prev.loc[prev["type"] == "expense", "abs_amount"].sum()) if len(prev) else recent_expense
+    
+    comparison_label = window_comparison_label(recent_days)
+    comparison_kind = COMPARISON_KIND_ADJACENT_WINDOWS
+
+    income_change = rel_change(recent_income, prev_income)
+    expense_change = rel_change(recent_expense, prev_expense)
+
+    recent_expenses = recent[recent["type"] == "expense"].copy()
+    total_recent_expenses = max(float(recent_expense), 1e-6)
+
+    by_vendor = recent_expenses.groupby("counterparty")["abs_amount"].sum().sort_values(ascending=False)
+    by_category = recent_expenses.groupby("category")["abs_amount"].sum().sort_values(ascending=False)
+
+    top_vendor = str(by_vendor.index[0]) if len(by_vendor) else "None"
+    top_vendor_share = float(by_vendor.iloc[0] / total_recent_expenses) if len(by_vendor) else 0.0
+    top_category = str(by_category.index[0]) if len(by_category) else "None"
+    top_category_share = float(by_category.iloc[0] / total_recent_expenses) if len(by_category) else 0.0
+
+    exp = w[w["type"] == "expense"]["abs_amount"]
+    exp_mean = float(exp.mean()) if len(exp) else 0.0
+    exp_std = float(exp.std(ddof=0)) if len(exp) else 0.0
+    exp_large_thr = exp_mean + large_sigma * exp_std if exp_std > 0 else (exp_mean * 3 if exp_mean > 0 else 0)
+
+    largest_expense = w[w["type"] == "expense"].sort_values("abs_amount", ascending=False).head(1)
+
+    recurring_candidates = w[w["type"] == "expense"].groupby(["counterparty", "category"]).size().sort_values(ascending=False)
+    recurring = recurring_candidates[recurring_candidates >= recurring_min_hits].head(5)
+    recurring_list = [{"counterparty": k[0], "category": k[1], "hits": int(v)} for k, v in recurring.items()]
+
+    overdue_ar: List[Dict[str, Any]] = []
+    overdue_ap: List[Dict[str, Any]] = []
+    has_invoice_fields = ("invoice_id" in w.columns) and ("due_date" in w.columns) and ("status" in w.columns)
+    if has_invoice_fields:
+        tmp = w.dropna(subset=["due_date"]).copy()
+        tmp["days_past_due"] = (end_date - tmp["due_date"]).dt.days
+        unpaid_status = {"open", "unpaid", "overdue", "outstanding", "draft"}
+        unpaid = tmp[tmp["status"].isin(unpaid_status)].copy()
+
+        if "direction" not in unpaid.columns:
+            unpaid["direction"] = np.where(unpaid["type"] == "income", "AR", "AP")
+
+        overdue = unpaid[unpaid["days_past_due"] >= overdue_days]
+
+        def top_overdue(d: pd.DataFrame) -> List[Dict[str, Any]]:
+            if d.empty:
+                return []
+            g = d.groupby("counterparty")["abs_amount"].sum().sort_values(ascending=False).head(5)
+            return [{"counterparty": str(vendor), "amount": float(amt)} for vendor, amt in g.items()]
+
+        overdue_ar = top_overdue(overdue[overdue["direction"].str.upper().eq("AR")])
+        overdue_ap = top_overdue(overdue[overdue["direction"].str.upper().eq("AP")])
+
+    cash_series = [{"date": str(idx.date()), "cash": float(v)} for idx, v in daily["cash"].items()]
+    exp_breakdown = [{"label": str(cat), "value": float(amt)} for cat, amt in by_category.head(8).items()] if len(by_category) else []
+
+    alerts: List[Alert] = []
+    fired_checks: set[str] = set()
+
+    if runway_days < low_cash_buffer_days:
+        gap = (low_cash_buffer_days - runway_days) / max(low_cash_buffer_days, 1e-6)
+        alerts.append(
+            Alert(
+    id="runway_tight",
+    severity="critical",
+    title="Cash runway is getting tight",
+    why=(
+        f"Average daily outflow over last {burn_days} days is ~{money(avg_daily_burn, currency)}. "
+        f"With current cash around {money(current_cash, currency)}, buffer is ~{runway_days:.0f} days "
+        f"(threshold {low_cash_buffer_days:.0f})."
+    ),
+    suggested_actions=[],
+    review_considerations=[
+        "Next 14 days of scheduled payments and commitments",
+        "Overdue invoice status (AR aging report shows collection opportunities)",
+        "Upcoming tax, payroll, and supplier obligations",
+        "Non-essential discretionary spend that could be deferred",
+    ],
+    api_considerations={
+        "suggested_tools": ["cash_flow_projection", "ar_aging_report", "payment_calendar"],
+        "external_context_types": ["industry_payment_terms", "seasonal_cash_patterns"],
+    },
+    signal_strength=signal_strength_from_gap(gap),
+    evidence={
+        "avg_daily_burn": avg_daily_burn,
+        "current_cash": current_cash,
+        "runway_days": runway_days,
+        "threshold_days": low_cash_buffer_days,
+        "gap": gap,
+    },
+)
+        )
+
+    if expense_change > expense_spike_pct:
+        gap = (expense_change - expense_spike_pct) / max(expense_spike_pct, 1e-6)
+        fired_checks.add("expense_spike")
+        alerts.append(
+            Alert(
+    id="expense_spike",
+    severity=severity_from_gap(gap),
+    title="Spending has increased vs the prior period",
+    why=_comparison_narrative(
+        comparison_label,
+        recent_expense,
+        prev_expense,
+        currency,
+        expense_change,
+    ),
+    suggested_actions=[],
+    review_considerations=[
+        f"Top expense category: {top_category} ({pct(top_category_share)} of recent spend)",
+        f"Top vendor: {top_vendor} ({pct(top_vendor_share)} of recent spend)",
+        "Planned vs unplanned spend classification (annual bills, inventory builds, etc.)",
+        "Whether this represents a new baseline or one-time event",
+    ],
+    api_considerations={
+        "suggested_tools": ["vendor_analysis", "category_trend", "budget_comparison"],
+        "external_context_types": ["vendor_pricing_changes", "industry_cost_inflation"],
+    },
+    signal_strength=signal_strength_from_gap(gap),
+    evidence={
+        "comparison_label": comparison_label,
+        "comparison_kind": comparison_kind,
+        "recent_expense": recent_expense,
+        "prev_expense": prev_expense,
+        "expense_change": expense_change,
+        "narrative_inputs": {
+            "recent": recent_expense,
+            "previous": prev_expense,
+            "delta": expense_change,
+        },
+        "top_category": top_category,
+        "top_vendor": top_vendor,
+        "gap": gap,
+    },
+)
+        )
+    if income_change < -revenue_drop_pct:
+        gap = ((-income_change) - revenue_drop_pct) / max(revenue_drop_pct, 1e-6)
+        fired_checks.add("revenue_drop")
+        alerts.append(
+            Alert(
+    id="revenue_drop",
+    severity=severity_from_gap(gap),
+    title="Income has dropped vs the prior period",
+    why=_comparison_narrative(
+        comparison_label,
+        recent_income,
+        prev_income,
+        currency,
+        income_change,
+    ),
+    suggested_actions=[],
+    review_considerations=[
+        "Invoice timing (late invoices) vs genuine demand slowdown (fewer sales)",
+        "AR aging: overdue accounts that could accelerate cash if collected",
+        "Pipeline and channel performance over last 2-4 weeks",
+        "Seasonal patterns or known client payment schedules",
+    ],
+    api_considerations={
+        "suggested_tools": ["sales_pipeline", "ar_aging_report", "revenue_forecast"],
+        "external_context_types": ["market_conditions", "seasonal_trends", "client_payment_patterns"],
+    },
+    signal_strength=signal_strength_from_gap(gap),
+    evidence={
+        "recent_income": recent_income,
+        "prev_income": prev_income,
+        "income_change": income_change,
+        "comparison_label": comparison_label,
+        "comparison_kind": comparison_kind,
+        "alert_id_version": ALERT_ID_VERSION,
+        "narrative_inputs": {
+            "recent": recent_income,
+            "previous": prev_income,
+            "delta": income_change,
+        },
+        "gap": gap,
+    },
+)
+        )
+
+    if (top_vendor_share > concentration_threshold) or (top_category_share > concentration_threshold):
+        share = max(top_vendor_share, top_category_share)
+        gap = (share - concentration_threshold) / max(concentration_threshold, 1e-6)
+        # Keep severity semantics consistent with signal magnitude. Near-threshold
+        # concentration is informational; materially above threshold is actionable.
+        sev = "warning" if gap >= 0.3 else "info"
+        label = "vendor" if top_vendor_share >= top_category_share else "category"
+        who = top_vendor if label == "vendor" else top_category
+        alerts.append(
+            Alert(
+    id="expense_concentration",
+    severity=sev,
+    title="Expense concentration is high (dependency risk)",
+    why=(
+        f"Top {label} '{who}' represents about {pct(share)} of expenses in last {recent_days} days "
+        f"(threshold {pct(concentration_threshold)}). High concentration can indicate dependency risk "
+        f"(e.g., a single supplier or cost bucket driving spend)."
+    ),
+    suggested_actions=[],
+    review_considerations=[
+        f"Payment terms and upcoming price changes with {who}",
+        "Availability of alternative suppliers for critical items",
+        "Current concentration trend (increasing, stable, or decreasing)",
+        "Supply chain disruption risk assessment",
+    ],
+    api_considerations={
+        "suggested_tools": ["vendor_concentration_report", "supplier_risk_assessment"],
+        "external_context_types": ["market_supplier_availability", "industry_concentration_norms"],
+    },
+    signal_strength=signal_strength_from_gap(gap),
+    evidence={"label": label, "who": who, "share": share, "threshold": concentration_threshold, "gap": gap},
+)
+        )
+
+    if not largest_expense.empty and exp_large_thr > 0:
+        row = largest_expense.iloc[0]
+        if float(row["abs_amount"]) >= exp_large_thr:
+            gap = (float(row["abs_amount"]) - exp_large_thr) / max(exp_large_thr, 1e-6)
+            alerts.append(
+                Alert(
+    id="large_expense",
+    severity="info",
+    title="A large expense transaction stands out",
+    why=(
+        f"Largest expense is {money(float(row['abs_amount']), currency)} to '{row['counterparty']}' "
+        f"({row['category']}) on {str(pd.to_datetime(row['date']).date())}. "
+        f"Above threshold {money(exp_large_thr, currency)}."
+    ),
+    suggested_actions=[],
+    review_considerations=[
+        "Whether this is one-off or recurring expense",
+        "Data quality: potential duplicate or export error",
+        "Known seasonal/annual obligations (insurance, licenses, equipment)",
+    ],
+    api_considerations={
+        "suggested_tools": ["transaction_detail_view", "duplicate_detection"],
+        "external_context_types": ["vendor_billing_patterns"],
+    },
+    signal_strength=signal_strength_from_gap(gap),
+    evidence={"threshold": exp_large_thr, "mean": exp_mean, "std": exp_std, "sigma": large_sigma, "gap": gap},
+)
+            )
+
+    if has_invoice_fields and overdue_ar:
+        total_overdue = sum(x["amount"] for x in overdue_ar)
+        gap = min(total_overdue / max(recent_income, 1e-6), 1.0) if recent_income > 0 else 0.5
+        alerts.append(
+            Alert(
+    id="overdue_receivables",
+    severity="warning",
+    title="Overdue receivables detected (cash timing risk)",
+    why=(f"Receivables appear overdue (>= {overdue_days} days). Top overdue customers sum to ~{money(total_overdue, currency)}."),
+    suggested_actions=[],
+    review_considerations=[
+        "Top 3 overdue customers (highest impact first)",
+        "Reminder cadence: pre-due, due date, +7 days, +14 days",
+        "Deposit/part-payment terms for new work if chronic overdue persists",
+        "Disputed invoices vs simply late payments",
+    ],
+    api_considerations={
+        "suggested_tools": ["ar_aging_report", "customer_payment_history"],
+        "external_context_types": ["industry_payment_terms", "customer_credit_profiles"],
+    },
+    signal_strength=signal_strength_from_gap(gap),
+    evidence={"overdue_days": overdue_days, "top_overdue_customers": overdue_ar, "gap": gap},
+)
+        )
+
+    if has_invoice_fields and overdue_ap:
+        total_overdue = sum(x["amount"] for x in overdue_ap)
+        gap = min(total_overdue / max(recent_expense, 1e-6), 1.0) if recent_expense > 0 else 0.3
+        alerts.append(
+            Alert(
+    id="overdue_payables",
+    severity="info",
+    title="Overdue payables detected (supplier relationship risk)",
+    why=(f"Payables appear overdue (>= {overdue_days} days). Top overdue suppliers sum to ~{money(total_overdue, currency)}."),
+    suggested_actions=[],
+    review_considerations=[
+        "Disputed items vs genuinely late payments",
+        "Proactive supplier communication if cash-constrained",
+        "Invoice status updates (mark settled items)",
+    ],
+    api_considerations={
+        "suggested_tools": ["ap_aging_report", "supplier_relationship_status"],
+        "external_context_types": ["supplier_payment_terms", "vendor_credit_limits"],
+    },
+    signal_strength=signal_strength_from_gap(gap),
+    evidence={"overdue_days": overdue_days, "top_overdue_suppliers": overdue_ap, "gap": gap},
+)
+        )
+
+    # ----------------------------
+    # C2.1 — record non-trigger reasons
+    # ----------------------------
+    non_triggers: List[Dict[str, Any]] = []
+
+    if "expense_spike" not in fired_checks:
+        non_triggers.append(
+            non_trigger_reason(
+                check_name="expense_spike",
+                missing_gates=[],
+                threshold_crossed=expense_change > expense_spike_pct,
+            )
+        )
+
+    if "revenue_drop" not in fired_checks:
+        non_triggers.append(
+            non_trigger_reason(
+                check_name="revenue_drop",
+                missing_gates=[],
+                threshold_crossed=income_change < -revenue_drop_pct,
+            )
+        )
+    
+    summary = {
+        "currency": currency,
+        "starting_cash": starting_cash,
+        "window_days": window_days,
+        "burn_days": burn_days,
+        "end_date": str(end_date.date()),
+        "recent_days": recent_days,
+        "current_cash": current_cash,
+        "avg_daily_burn": avg_daily_burn,
+        "runway_days": runway_days,
+        "recent_income": recent_income,
+        "recent_expense": recent_expense,
+        "prev_income": prev_income,
+        "prev_expense": prev_expense,
+        "comparison_kind": comparison_kind,
+        "comparison_label": comparison_label,
+        "income_change": income_change,
+        "expense_change": expense_change,
+        "non_trigger_explainability": non_triggers,
+        "top_vendor": top_vendor,
+        "top_vendor_share": top_vendor_share,
+        "top_category": top_category,
+        "top_category_share": top_category_share,
+        "recurring_expenses": recurring_list,
+        "charts": {"cash_series": cash_series, "expense_breakdown": exp_breakdown},
+    }
+
+    quality = data_quality(df, w)
+    return summary, alerts, quality
+
+
+# ----------------------------
+# Alert memory + events (FIX: no nested DB writes)
+# ----------------------------
+def get_alert_state_map() -> dict:
+    with db_conn() as conn:
+        try:
+            rows = conn.execute("SELECT alert_id, status, note, updated_at, last_score FROM alert_state").fetchall()
+        except Exception:
+            return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        out[str(r["alert_id"])] = {
+            "status": str(r["status"] or "review"),
+            "note": str(r["note"] or ""),
+            "updated_at": str(r["updated_at"] or ""),
+            "last_score": float(r["last_score"] or 0.0),
+        }
+    return out
+
+
+def get_feedback_map(run_id: int) -> Dict[str, Dict[str, Any]]:
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT alert_id, status, note, updated_at FROM alert_feedback WHERE run_id = ?",
+            (run_id,),
+        ).fetchall()
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        out[str(r["alert_id"])] = {
+            "status": str(r["status"]),
+            "note": str(r["note"]),
+            "updated_at": str(r["updated_at"]),
+        }
+    return out
+
+
+def upsert_alert_state(
+    alert_id: str,
+    status: str,
+    note: str,
+    run_id: int | None,
+    score: float,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    now = datetime.utcnow().isoformat()
+    own = conn is None
+    if own:
+        conn = _connect_db()
+    try:
+        cur = conn.cursor()
+        row = cur.execute("SELECT status, last_score FROM alert_state WHERE alert_id = ?", (alert_id,)).fetchone()
+        if row is None:
+            cur.execute(
+                "INSERT INTO alert_state (alert_id, status, note, updated_at, last_seen_run_id, last_score) VALUES (?, ?, ?, ?, ?, ?)",
+                (alert_id, status, note or "", now, run_id, float(score)),
+            )
+        else:
+            prev_score = float(row["last_score"] or 0.0)
+            # Track max score ever seen (used for "worsened" checks)
+            new_score = max(float(score), prev_score)
+            cur.execute(
+                "UPDATE alert_state SET status=?, note=?, updated_at=?, last_seen_run_id=?, last_score=? WHERE alert_id=?",
+                (status, note or "", now, run_id, new_score, alert_id),
+            )
+        if own:
+            conn.commit()
+    finally:
+        if own and conn is not None:
+            conn.close()
+
+
+def insert_alert_event(
+    run_id: int | None,
+    alert_id: str,
+    event_type: str,
+    status: str | None = None,
+    note: str | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    own = conn is None
+    if own:
+        conn = _connect_db()
+    try:
+        conn.execute(
+            "INSERT INTO alert_events (created_at, run_id, alert_id, event_type, status, note) VALUES (?, ?, ?, ?, ?, ?)",
+            (datetime.utcnow().isoformat(), run_id, alert_id, event_type, status, note),
+        )
+        if own:
+            conn.commit()
+    finally:
+        if own and conn is not None:
+            conn.close()
+
+
+def update_alert_memory_for_run(
+    run_id: int, alerts: List[Dict[str, Any]], improve_margin: float = 0.15
+) -> None:
+    """
+    Updates alert_state based on current run:
+    - Inserts new alerts
+    - Reopens resolved alerts if they reappear
+    - Auto-resolves alerts that disappear
+    - If suppressed alerts worsen, force back to review
+    """
+    now = datetime.utcnow().isoformat()
+
+    with db_conn() as conn:
+        cur = conn.cursor()
+        current_ids = {str(a.get("id")) for a in alerts if a.get("id") is not None}
+
+        # Update/insert all current alerts
+        for a in alerts:
+            aid = str(a.get("id"))
+            if not aid:
+                continue
+            score = alert_score(a)
+
+            row = cur.execute("SELECT status, last_score FROM alert_state WHERE alert_id = ?", (aid,)).fetchone()
+            if row is None:
+                cur.execute(
+                    "INSERT INTO alert_state (alert_id, status, note, updated_at, last_seen_run_id, last_score) VALUES (?, 'review', '', ?, ?, ?)",
+                    (aid, now, run_id, float(score)),
+                )
+                insert_alert_event(run_id, aid, "auto_new", "review", None, conn=conn)
+            else:
+                prev_status = str(row["status"])
+                prev_score = float(row["last_score"] or 0.0)
+
+                worsened = float(score) > (prev_score * 1.15)
+                improved = float(score) < (prev_score * (1.0 - improve_margin))
+
+                if prev_status == "resolved":
+                    cur.execute(
+                        "UPDATE alert_state SET status='review', updated_at=?, last_seen_run_id=?, last_score=? WHERE alert_id=?",
+                        (now, run_id, float(score), aid),
+                    )
+                    insert_alert_event(run_id, aid, "auto_reopened", "review", None, conn=conn)
+                else:
+                    if prev_status in {"expected", "actioned", "ignore", "snoozed"} and worsened:
+                        cur.execute(
+                            "UPDATE alert_state SET status='review', updated_at=?, last_seen_run_id=?, last_score=? WHERE alert_id=?",
+                            (now, run_id, float(score), aid),
+                        )
+                        insert_alert_event(
+                            run_id,
+                            aid,
+                            "auto_worsened",
+                            "review",
+                            f"Alert worsened from {prev_score:.2f} to {score:.2f}",
+                            conn=conn,
+                        )
+                    elif improved:
+                        cur.execute(
+                            "UPDATE alert_state SET updated_at=?, last_seen_run_id=?, last_score=? WHERE alert_id=?",
+                            (now, run_id, float(score), aid),
+                        )
+                        insert_alert_event(
+                            run_id,
+                            aid,
+                            "auto_improved",
+                            prev_status,
+                            f"Alert improved from {prev_score:.2f} to {score:.2f}",
+                            conn=conn,
+                        )
+                    else:
+                        cur.execute(
+                            "UPDATE alert_state SET updated_at=?, last_seen_run_id=?, last_score=? WHERE alert_id=?",
+                            (now, run_id, max(float(score), prev_score), aid),
+                        )
+
+        # Auto-resolve alerts not present this run
+        rows = cur.execute("SELECT alert_id, status FROM alert_state WHERE status != 'resolved'").fetchall()
+        for r in rows:
+            aid = str(r["alert_id"])
+            if aid not in current_ids:
+                cur.execute(
+                    "UPDATE alert_state SET status='resolved', updated_at=? WHERE alert_id=?",
+                    (now, aid),
+                )
+                insert_alert_event(run_id, aid, "auto_resolved", "resolved", "Alert no longer triggered", conn=conn)
+
+        conn.commit()
+
+
+def _apply_effective_feedback(
+    alerts: List[Dict[str, Any]],
+    per_run_feedback: Dict[str, Dict[str, Any]],
+    state: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for a in alerts:
+        aid = str(a.get("id") or "")
+        fb = per_run_feedback.get(aid) if aid else None
+        st = state.get(aid) if aid else None
+
+        if fb:
+            status = str(fb.get("status") or "review")
+            note = str(fb.get("note") or "")
+            updated_at = str(fb.get("updated_at") or "")
+        elif st:
+            status = str(st.get("status") or "review")
+            note = str(st.get("note") or "")
+            updated_at = str(st.get("updated_at") or "")
+        else:
+            status, note, updated_at = "review", "", ""
+
+        ax = dict(a)
+        ax["_status"] = status
+        ax["_note"] = note
+        ax["_updated_at"] = updated_at
+        out.append(ax)
+
+    order = {"review": 0, "expected": 1, "actioned": 2, "ignore": 3, "snoozed": 4, "resolved": 5}
+    out.sort(key=lambda x: (order.get(str(x.get("_status") or "review"), 9), str(x.get("severity") or "")))
+    return out
+
+
+# ----------------------------
+# Run retrieval helpers
+# ----------------------------
+def _latest_run_snapshot() -> Dict[str, Any] | None:
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT id, created_at, filename, summary_json, alerts_json, quality_json FROM runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row["id"]),
+        "created_at": str(row["created_at"]),
+        "filename": str(row["filename"]),
+        "summary": safe_json_loads(row["summary_json"], {}) or {},
+        "alerts": safe_json_loads(row["alerts_json"], []) or [],
+        "quality": safe_json_loads(row["quality_json"], {}) or {},
+    }
+
+
+def _latest_alert_map(latest_run: Dict[str, Any] | None) -> Dict[str, Dict[str, Any]]:
+    if not latest_run:
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for a in latest_run.get("alerts") or []:
+        if isinstance(a, dict) and a.get("id") is not None:
+            out[str(a.get("id"))] = a
+    return out
+
+
+def _hash_settings(s: Dict[str, Any]) -> str:
+    # Stable hash for idempotency checks (ignores ordering)
+    # Do not include secrets in the hash; changing webhook secret should not affect analysis idempotency.
+    ss = dict(s or {})
+    ss.pop("webhook_secret", None)
+    blob = json.dumps(ss, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _safe_source_block(provider: str, mode: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    d = {"provider": str(provider or "unknown"), "mode": str(mode or "unknown")}
+    if isinstance(extra, dict):
+        # keep it small/safe
+        for k, v in extra.items():
+            if k in {"path", "note", "ingest_id"}:
+                d[k] = _safe_text(v, 200)
+    return d
+
+
+def _build_run_params(settings, source, contract, cat_report):
+    s_for_params = dict(settings or {})
+    s_for_params.pop("webhook_secret", None)
+    return {
+        "settings": s_for_params,
+        "source": source,
+        "ledger_contract": contract,
+        "categorisation": cat_report,
+        "rule_inventory_version": _rule_inventory_hash(),  # ADD THIS
+        "rule_inventory": RULE_INVENTORY,
+    }
+
+
+
+# ----------------------------
+# Routes
+# ----------------------------
+@app.get("/", response_class=RedirectResponse)
+def home_redirect():
+    return RedirectResponse(url="/dashboard", status_code=302)
+
+
+@app.get("/home", response_class=RedirectResponse)
+def home_alias():
+    return RedirectResponse(url="/dashboard", status_code=302)
+
+@app.get("/latest", response_class=RedirectResponse)
+def return_to_latest(request: Request):
+    """Clear any selected historical run and return to the latest dataset."""
+    _clear_active_run(request)
+    return RedirectResponse(url="/dashboard", status_code=302)
+
+
+@app.get("/healthz", response_class=JSONResponse)
+def healthz():
+    # Simple health endpoint for "is it alive?" checks.
+    return JSONResponse({"ok": True, "app": APP_TITLE, "utc": datetime.utcnow().isoformat()})
+
+
+@app.get("/upload", response_class=HTMLResponse)
+def upload_page(request: Request, run_id: Optional[int] = Query(None)):
+    active_run, latest_run_actual = _active_and_latest(request, run_id)
+    s = read_settings()
+    return _render_or_fallback(
+        request,
+        "index.html",
+        {"request": request, "s": s, "title": APP_TITLE, "active_run_id": (active_run.get("id") if active_run else None), "latest_run_id": (latest_run_actual.get("id") if latest_run_actual else None), "run_qs": _run_qs(active_run, latest_run_actual)},
+        fallback_title=APP_TITLE,
+        fallback_html="""
+        <p>Upload a CSV at <code>/analyze</code> (POST multipart form field <code>file</code>).</p>
+        <p>Or use the UI if <code>templates/index.html</code> exists.</p>
+        """,
+    )
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request, run_id: Optional[int] = Query(None)):
+    active_run, latest_run_actual = _active_and_latest(request, run_id)
+    s = read_settings()
+    return _render_or_fallback(
+        request,
+        "settings.html",
+        {"request": request, "s": s, "title": "Settings", "active_run_id": (active_run.get("id") if active_run else None), "latest_run_id": (latest_run_actual.get("id") if latest_run_actual else None), "run_qs": _run_qs(active_run, latest_run_actual)},
+        fallback_title="Settings",
+        fallback_html="<p>Settings template missing. Use <code>POST /settings</code> to update.</p>",
+    )
+
+
+@app.post("/settings")
+def settings_save(
+    currency: str = Form("AUD"),
+    starting_cash: float = Form(25000),
+    window_days: int = Form(90),
+    burn_days: int = Form(30),
+    low_cash_buffer_days: int = Form(21),
+    expense_spike_pct: float = Form(0.35),
+    revenue_drop_pct: float = Form(0.25),
+    concentration_threshold: float = Form(0.45),
+    large_txn_sigma: float = Form(3.0),
+    recurring_min_hits: int = Form(3),
+    overdue_days: int = Form(7),
+    recent_compare_days: int = Form(30),
+    demo_mode: Any = Form(True),
+    enable_integrations_scaffold: Any = Form(True),
+):
+    # Defensive clamping for demo safety (avoid negative/zero nonsense)
+    window_days = _clamp_int(window_days, 14, 3660, 90)
+    burn_days = _clamp_int(burn_days, 7, 365, 30)
+    low_cash_buffer_days = _clamp_int(low_cash_buffer_days, 1, 365, 21)
+    recent_compare_days = _clamp_int(recent_compare_days, 7, 365, 30)
+
+    starting_cash = _clamp_float(starting_cash, 0.0, 1e12, 25000.0)
+    expense_spike_pct = _clamp_float(expense_spike_pct, 0.0, 1.0, 0.35)
+    revenue_drop_pct = _clamp_float(revenue_drop_pct, 0.0, 1.0, 0.25)
+    concentration_threshold = _clamp_float(concentration_threshold, 0.0, 1.0, 0.45)
+    large_txn_sigma = _clamp_float(large_txn_sigma, 0.0, 20.0, 3.0)
+    recurring_min_hits = _clamp_int(recurring_min_hits, 1, 365, 3)
+    overdue_days = _clamp_int(overdue_days, 1, 365, 7)
+
+    new_s = {
+        "currency": str(currency).upper().strip() or "AUD",
+        "starting_cash": float(starting_cash),
+        "window_days": int(window_days),
+        "burn_days": int(burn_days),
+        "low_cash_buffer_days": int(low_cash_buffer_days),
+        "expense_spike_pct": float(expense_spike_pct),
+        "revenue_drop_pct": float(revenue_drop_pct),
+        "concentration_threshold": float(concentration_threshold),
+        "large_txn_sigma": float(large_txn_sigma),
+        "recurring_min_hits": int(recurring_min_hits),
+        "overdue_days": int(overdue_days),
+        "recent_compare_days": int(recent_compare_days),
+        "demo_mode": bool(_parse_bool(demo_mode, default=True)),
+        "enable_integrations_scaffold": bool(_parse_bool(enable_integrations_scaffold, default=True)),
+        "webhook_secret": read_settings().get("webhook_secret", "CHANGE_ME_DEMO_SECRET"),
+    }
+    write_settings(new_s)
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@app.post("/analyze")
+async def analyze(request: Request, file: UploadFile = File(...)):
+    # Read content and enforce size
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        return _render_or_fallback(
+            request,
+            "error.html",
+            {
+                "request": request,
+                "title": "Upload failed",
+                "error_title": "Upload failed",
+                "error_message": f"That file is too large for this demo (max {MAX_UPLOAD_BYTES} bytes).",
+                "schema_help": None,
+                "actions": [
+                    {"label": "Back to Upload", "href": "/upload"},
+                    {"label": "Home", "href": "/dashboard"},
+                    {"label": "History", "href": "/history"},
+                ],
+            },
+            fallback_title="Upload failed",
+            fallback_html=f"<p>That file is too large for this demo (max {MAX_UPLOAD_BYTES} bytes).</p>",
+        )
+
+    s = read_settings()
+    settings_hash = _hash_settings(s)
+    file_sha = hashlib.sha256(content).hexdigest()
+
+    # Idempotency: if same file + same settings already analyzed, reuse the existing run
+    with db_conn() as conn:
+        if _table_has_column(conn, "runs", "file_sha256") and _table_has_column(conn, "runs", "settings_hash"):
+            row = conn.execute(
+                "SELECT id FROM runs WHERE file_sha256 = ? AND settings_hash = ? ORDER BY id DESC LIMIT 1",
+                (file_sha, settings_hash),
+            ).fetchone()
+            if row:
+                # Persist run context so navigating elsewhere keeps the selected run.
+                try:
+                    request.session["active_run_id"] = int(row["id"])
+                except Exception:
+                    pass
+                return RedirectResponse(url=f"/run/{int(row['id'])}", status_code=303)
+
+    raw_df = None
+    try:
+        # Demo safety: cap rows at read-time to avoid memory blowups.
+        raw_df = pd.read_csv(io.BytesIO(content), nrows=MAX_UPLOAD_ROWS + 1)
+        if isinstance(raw_df, pd.DataFrame) and len(raw_df) > MAX_UPLOAD_ROWS:
+            return _render_or_fallback(
+                request,
+                "error.html",
+                {
+                    "request": request,
+                    "title": "Upload failed",
+                    "error_title": "Upload failed",
+                    "error_message": f"That CSV has too many rows for this demo (max {MAX_UPLOAD_ROWS:,}). Please export a smaller date range and try again.",
+                    "schema_help": {
+                        "missing_required": [],
+                        "expected_headers": ["date", "amount", "type", "category", "counterparty", "description"],
+                        "example_header_row": "date,amount,type,category,counterparty,description",
+                        "note": "Previous runs are saved and unaffected by a failed upload.",
+                    },
+                    "actions": [
+                        {"label": "Back to Upload", "href": "/upload"},
+                        {"label": "Home", "href": "/dashboard"},
+                        {"label": "History", "href": "/history"},
+                    ],
+                },
+                fallback_title="Upload failed",
+                fallback_html=f"<p>That CSV has too many rows for this demo (max {MAX_UPLOAD_ROWS:,}).</p>",
+            )
+
+        df = normalise_csv(raw_df)
+        contract = _ledger_contract_report(df)
+        # Categorisation (deterministic, DB-backed)
+        with db_conn() as conn:
+            df, cat_report = apply_deterministic_categorisation(df, s, conn)
+        summary, alerts, quality = build_summary_and_alerts(df, s)
+    except Exception as e:
+        logger.info("Analyze error: %s", e)
+
+        # Build schema-help (strict + explainable). No stack traces shown to end users.
+        expected_headers = ["date", "amount", "type", "category", "counterparty", "description"]
+        missing_required: List[str] = []
+
+        try:
+            if isinstance(raw_df, pd.DataFrame):
+                cols = [c.strip().lower() for c in raw_df.columns]
+                # mirror the rename map used in normalise_csv (only for explaining missing columns)
+                rename_map = {
+                    "transaction_date": "date",
+                    "txn_date": "date",
+                    "posted_date": "date",
+                    "value": "amount",
+                    "total": "amount",
+                }
+                mapped = {rename_map.get(c, c) for c in cols}
+                for req in ["date", "amount"]:
+                    if req not in mapped:
+                        missing_required.append(req)
+        except Exception:
+            missing_required = []
+
+        if not missing_required and "CSV missing required column" in str(e):
+            # Fall back to parsing the message
+            try:
+                missing_required = [str(e).split(":")[-1].strip()]
+            except Exception:
+                missing_required = []
+
+        schema_help = {
+            "missing_required": missing_required,
+            "expected_headers": expected_headers,
+            "example_header_row": ",".join(expected_headers),
+            "note": "Previous runs are saved and unaffected by a failed upload.",
+        }
+
+        msg = (
+            "We couldn't analyse that CSV. This usually means the file is missing required columns or has an unsupported format."
+            if missing_required
+            else "We couldn't analyse that CSV. Please check the file format and try again."
+        )
+
+        return _render_or_fallback(
+            request,
+            "error.html",
+            {
+                "request": request,
+                "title": "Upload failed",
+                "error_title": "Upload failed",
+                "error_message": msg,
+                "schema_help": schema_help,
+                "actions": [
+                    {"label": "Back to Upload", "href": "/upload"},
+                    {"label": "Home", "href": "/dashboard"},
+                    {"label": "History", "href": "/history"},
+                ],
+            },
+            fallback_title="Upload failed",
+            fallback_html=f"<p>{msg}</p><pre style='background:#f6f6f6;padding:12px;border-radius:8px;white-space:pre-wrap;'>{json.dumps(schema_help, indent=2)}</pre>",
+        )
+    alerts_payload = [a.__dict__ for a in alerts]
+
+    # Provenance / run params (never store secrets)
+    try:
+        contract
+    except Exception:
+        contract = {"schema_version": LEDGER_SCHEMA_VERSION, "adapter_version": ADAPTER_VERSION}
+    try:
+        cat_report
+    except Exception:
+        cat_report = {"enabled": False, "applied": 0}
+    # Build full, auditable run parameters (provenance + contract + categorisation)
+    # Secrets are stripped inside _build_run_params
+    params = _build_run_params(
+        settings=s,
+        source=_safe_source_block("csv_upload", "upload"),
+        contract=contract,
+        cat_report=cat_report,
+    )
+
+    safe_filename = ""
+    try:
+        safe_filename = Path(str(file.filename or "")).name
+    except Exception:
+        safe_filename = str(file.filename or "")
+    if not safe_filename:
+        safe_filename = "upload.csv"
+
+    with db_conn() as conn:
+        run_id = _insert_run_row(
+            conn=conn,
+            created_at=datetime.utcnow().isoformat(),
+            filename=str(safe_filename),
+            params_json=json.dumps(params),
+            summary_json=json.dumps(summary),
+            alerts_json=json.dumps(alerts_payload),
+            quality_json=json.dumps(quality),
+            file_sha256=hashlib.sha256(content).hexdigest(),
+            settings_hash=_hash_settings(s),
+        )
+        conn.commit()
+
+    # Update alert memory / resolved status based on this run (single-connection inside)
+    try:
+        update_alert_memory_for_run(int(run_id), alerts_payload)
+    except Exception as e:
+        logger.warning("Alert memory update failed (non-fatal): %s", e)
+
+    # Demo-friendly: persist active run context and land on the run page (audit trail)
+    try:
+        request.session["active_run_id"] = int(run_id)
+    except Exception:
+        pass
+    return RedirectResponse(url=f"/run/{run_id}", status_code=303)
+
+
+@app.get("/history", response_class=HTMLResponse)
+def history(request: Request, run_id: Optional[int] = Query(None)):
+    active_run, latest_run_actual = _active_and_latest(request, run_id)
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, created_at, filename, summary_json, quality_json FROM runs ORDER BY id DESC LIMIT 200"
+        ).fetchall()
+
+    runs = []
+    for r in rows:
+        summary = safe_json_loads(r["summary_json"], {}) or {}
+        quality = safe_json_loads(r["quality_json"], {}) or {}
+        runs.append(
+            {
+                "id": int(r["id"]),
+                "created_at": str(r["created_at"]),
+                "filename": str(r["filename"]),
+                "end_date": summary.get("end_date"),
+                "currency": summary.get("currency", "AUD"),
+                "current_cash": float(summary.get("current_cash", 0.0)),
+                "runway_days": float(summary.get("runway_days", 0.0)),
+                "quality_score": float(quality.get("score", 0.0)),
+            }
+        )
+
+    return _render_or_fallback(
+        request,
+        "history.html",
+        {"request": request, "runs": runs, "title": "History", "active_run_id": (active_run.get("id") if active_run else None), "latest_run_id": (latest_run_actual.get("id") if latest_run_actual else None), "run_qs": _run_qs(active_run, latest_run_actual)},
+        fallback_title="History",
+        fallback_html="<p>History template missing. Use <code>/run/&lt;id&gt;</code> or <code>/api/runs</code>.</p>",
+    )
+
+
+@app.get("/alerts", response_class=HTMLResponse)
+def alerts_control_panel(request: Request, run_id: Optional[int] = Query(None)):
+    active_run, latest_run_actual = _active_and_latest(request, run_id)
+    latest_run = active_run
+    latest_alerts_map = _latest_alert_map(latest_run)
+
+    sev_rank = {"critical": 0, "warning": 1, "info": 2}
+
+    # Snapshot-mode: ONLY show alerts triggered in the latest run.
+    # This prevents "residual" alerts from prior runs appearing on the Alerts page.
+    alert_ids_now = list(latest_alerts_map.keys())
+
+    state_by_id: Dict[str, sqlite3.Row] = {}
+    if alert_ids_now:
+        placeholders = ",".join(["?"] * len(alert_ids_now))
+        with db_conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT alert_id, status, note, updated_at, last_score, last_seen_run_id
+                FROM alert_state
+                WHERE alert_id IN ({placeholders})
+                """,
+                tuple(alert_ids_now),
+            ).fetchall()
+        state_by_id = {str(r["alert_id"]): r for r in rows}
+
+    alerts_with_details: List[Dict[str, Any]] = []
+    for aid, live in latest_alerts_map.items():
+        r = state_by_id.get(aid)
+
+        status = str(r["status"]) if r else "review"
+        note = str(r["note"] or "") if r else ""
+        updated_at = str(r["updated_at"] or "") if r else ""
+        last_score = float(r["last_score"] or 0.0) if r else float(alert_score(live))
+        last_seen_run_id = r["last_seen_run_id"] if r else (int(latest_run["id"]) if latest_run else None)
+
+        alerts_with_details.append(
+            {
+                "alert_id": aid,
+                "status": status,
+                "note": note,
+                "updated_at": updated_at,
+                "last_score": last_score,
+                "last_seen_run_id": last_seen_run_id,
+                "title": live.get("title") or aid,
+                "severity": live.get("severity") or "info",
+                "why": live.get("why") or "",
+                "suggested_actions": live.get("suggested_actions") or [],
+                "signal_strength": live.get("signal_strength") or "",
+                "is_triggered_now": True,  # by construction (latest run only)
+            }
+        )
+
+    # Needs attention: still triggered + status=review (top 5)
+    needs_attention = [a for a in alerts_with_details if a["status"] == "review"]
+    needs_attention.sort(
+        key=lambda x: (sev_rank.get(str(x.get("severity")), 9), -float(x.get("last_score") or 0.0))
+    )
+    needs_attention = needs_attention[:5]
+
+    # Active: triggered now + not resolved
+    all_active = [a for a in alerts_with_details if a["status"] != "resolved"]
+    all_active.sort(
+        key=lambda x: (
+            sev_rank.get(str(x.get("severity")), 9),
+            -float(x.get("last_score") or 0.0),
+            str(x.get("alert_id") or ""),
+        )
+    )
+
+    # Quieted/resolved (snapshot-mode): only show items that are STILL triggered now
+    # but the user has set to expected/actioned/ignore/snoozed/resolved.
+    quiet_statuses = {"expected", "actioned", "ignore", "snoozed", "resolved"}
+    quieted_resolved = [a for a in alerts_with_details if a["status"] in quiet_statuses]
+    quieted_resolved.sort(
+        key=lambda x: (0 if x.get("status") == "resolved" else 1, str(x.get("updated_at") or "")),
+        reverse=True,
+    )
+
+    return _render_or_fallback(
+        request,
+        "alerts.html",
+        {
+            "request": request,
+            "title": "Alerts",
+            "latest_run": latest_run,
+            "needs_attention": needs_attention,
+            "all_active": all_active,
+            "quieted_resolved": quieted_resolved,
+            "active_run_id": (latest_run.get("id") if latest_run else None),
+            "latest_run_id": (latest_run_actual.get("id") if latest_run_actual else None),
+            "run_qs": _run_qs(latest_run, latest_run_actual),
+        },
+        fallback_title="Alerts",
+        fallback_html="<p>Alerts template missing. Use <code>/api/alerts/state</code> for JSON.</p>",
+    )
+
+
+
+@app.post("/alerts/{alert_id}/update")
+def update_alert_status(
+    request: Request,
+    alert_id: str,
+    status: str = Form(...),
+    note: str = Form(""),
+):
+    status = str(status).strip().lower()
+    if status not in {"expected", "actioned", "ignore", "snoozed", "review"}:
+        status = "review"
+    note_clean = str(note or "").strip()
+
+    # Prefer active run context if the user is browsing history; fall back to latest.
+    # This keeps scoring consistent with what the user is looking at.
+    latest_run = _latest_run_snapshot()
+    active_id = _get_active_run_id(request, None)
+    chosen = _run_snapshot(active_id) if active_id is not None else latest_run
+    run_id = int(chosen["id"]) if chosen else None
+    score = 0.0
+    if chosen:
+        amap = _latest_alert_map(chosen)
+        a = amap.get(str(alert_id))
+        if a:
+            score = float(alert_score(a))
+
+    upsert_alert_state(alert_id=alert_id, status=status, note=note_clean, run_id=run_id, score=score)
+    insert_alert_event(run_id=run_id, alert_id=alert_id, event_type="user_feedback", status=status, note=note_clean)
+    return RedirectResponse(url=f"/alerts#{alert_id}", status_code=303)
+
+
+@app.get("/alerts/{alert_id}", response_class=HTMLResponse)
+def alert_detail(request: Request, alert_id: str, readonly: bool = Query(False), run_id: Optional[int] = Query(None)):
+    active_run, latest_run_actual = _active_and_latest(request, run_id)
+    run_qs = _run_qs(active_run, latest_run_actual)
+
+    with db_conn() as conn:
+        state = conn.execute(
+            """
+            SELECT alert_id, status, note, updated_at, last_seen_run_id, last_score
+            FROM alert_state
+            WHERE alert_id = ?
+            """,
+            (alert_id,),
+        ).fetchone()
+
+        events = conn.execute(
+            """
+            SELECT created_at, run_id, event_type, status, note
+            FROM alert_events
+            WHERE alert_id = ?
+            ORDER BY created_at DESC
+            LIMIT 500
+            """,
+            (alert_id,),
+        ).fetchall()
+
+        recent_runs = conn.execute(
+            "SELECT id, created_at, filename, alerts_json FROM runs ORDER BY id DESC LIMIT 120"
+        ).fetchall()
+
+    chosen = active_run or latest_run_actual
+    if chosen:
+        with db_conn() as conn:
+            latest = conn.execute(
+                "SELECT id, alerts_json FROM runs WHERE id = ?",
+                (int(chosen["id"]),),
+            ).fetchone()
+    else:
+        latest = None
+
+    appearances = []
+    for r in recent_runs:
+        arr = safe_json_loads(r["alerts_json"], []) or []
+        if isinstance(arr, list) and any(isinstance(x, dict) and str(x.get("id")) == str(alert_id) for x in arr):
+            appearances.append({"run_id": int(r["id"]), "created_at": str(r["created_at"]), "filename": str(r["filename"])})
+
+    alert_details = None
+    if latest:
+        arr = safe_json_loads(latest["alerts_json"], []) or []
+        for a in arr:
+            if isinstance(a, dict) and str(a.get("id")) == str(alert_id):
+                alert_details = a
+                break
+
+    return _render_or_fallback(
+        request,
+        "alert_detail.html",
+        {
+            "request": request,
+            "title": f"Alert: {alert_id}",
+            "alert_id": alert_id,
+            "state": dict(state) if state else None,
+            "events": [dict(e) for e in events],
+            "appearances": appearances,
+            "alert_details": alert_details,
+            "readonly": bool(readonly),
+            "active_run_id": (active_run.get("id") if active_run else None),
+            "latest_run_id": (latest_run_actual.get("id") if latest_run_actual else None),
+            "run_qs": run_qs,
+        },
+        fallback_title=f"Alert: {alert_id}",
+        fallback_html="<p>Alert detail template missing. Use <code>/api/alerts/state</code> and <code>/api/alerts/events</code>.</p>",
+    )
+
+def return_render_or_fallback(
+    request,
+    template_name,
+    context,
+    fallback_title=None,
+    fallback_html=None,
+):
+    try:
+        return templates.TemplateResponse(template_name, context)
+    except Exception:
+        return HTMLResponse(
+            content=f"""
+            <h1>{fallback_title or "Page unavailable"}</h1>
+            {fallback_html or "<p>Unable to render this page.</p>"}
+            """,
+            status_code=200,
+        )
+
+
+@app.get("/insights", response_class=HTMLResponse)
+def insights(request: Request, run_id: Optional[int] = Query(None)):
+    active_run, latest_run_actual = _active_and_latest(request, run_id)
+    active_id = int(active_run["id"]) if active_run else None
+
+    with db_conn() as conn:
+        if active_id is None:
+            rows = conn.execute(
+                "SELECT id, created_at, summary_json, alerts_json FROM runs ORDER BY id DESC LIMIT 2"
+            ).fetchall()
+        else:
+            # Compare the active run to the most recent run before it (if any).
+            rows = conn.execute(
+                "SELECT id, created_at, summary_json, alerts_json FROM runs WHERE id <= ? ORDER BY id DESC LIMIT 2",
+                (active_id,),
+            ).fetchall()
+
+    if len(rows) == 0:
+        return _render_or_fallback(
+            request,
+            "insights.html",
+            {"request": request, "title": "Insights", "empty": True},
+            fallback_title="Insights",
+            fallback_html="<p>No runs yet. Upload a CSV on <code>/upload</code>.</p>",
+        )
+
+    latest = rows[0] if rows else None
+    prev = rows[1] if len(rows) > 1 else None
+
+    # ----------------------------
+    # Data quality (safe, optional)
+    # ----------------------------
+    quality = None
+    try:
+        if latest and latest.get("quality_json"):
+            quality = json.loads(latest["quality_json"])
+    except Exception:
+        quality = None
+
+
+
+    latest_alerts = {str(a.get("id")) for a in (safe_json_loads(latest["alerts_json"], []) or []) if isinstance(a, dict)}
+    prev_alerts = {str(a.get("id")) for a in (safe_json_loads(prev["alerts_json"], []) or []) if isinstance(a, dict)} if prev else set()
+
+    new_alerts = sorted(list(latest_alerts - prev_alerts))
+    cleared_alerts = sorted(list(prev_alerts - latest_alerts))
+
+    latest_summary = safe_json_loads(latest["summary_json"], {}) or {}
+    prev_summary = safe_json_loads(prev["summary_json"], {}) if prev else {}
+
+    # Always define runway_na and runway_note before any use
+    runway_na = False
+    runway_note = ""
+    try:
+        avg_burn = float(latest_summary.get("avg_daily_burn", 0))
+        window_days = int(latest_summary.get("window_days", 0))
+        if avg_burn < 1 or window_days < 30:
+            runway_na = True
+            runway_note = "Runway is not meaningful due to insufficient or irregular expense data."
+    except Exception:
+        runway_na = True
+        runway_note = "Runway could not be calculated reliably."
+
+    currency = str(latest_summary.get("currency", "AUD"))
+
+    def _d(key: str) -> Optional[float]:
+        try:
+            return float(latest_summary.get(key, 0.0)) - float(prev_summary.get(key, 0.0))
+        except Exception:
+            return None
+
+    delta_display: Dict[str, str] = {
+        "Cash Δ": money(_d("current_cash") or 0.0, currency) if prev else "—",
+        "Runway Δ": "—" if (runway_na or not prev) else f"{(_d('runway_days') or 0.0):.0f} days",
+        "Income Δ": money(_d("recent_income") or 0.0, currency) if prev else "—",
+        "Expenses Δ": money(_d("recent_expense") or 0.0, currency) if prev else "—",
+        "Income change Δ": pct(_d("income_change")) if prev else "—",
+        "Expense change Δ": pct(_d("expense_change")) if prev else "—",
+    }
+
+    exec_summary = {
+        "currency": currency,
+        "current_cash": float(latest_summary.get("current_cash") or 0.0),
+        "runway_days": None if runway_na else float(latest_summary.get("runway_days") or 0.0),
+        "income_change": float(latest_summary.get("income_change") or 0.0),
+        "expense_change": float(latest_summary.get("expense_change") or 0.0),
+    }
+
+    return return_render_or_fallback(
+        request,
+        "insights.html",
+        {
+            "runway_na": runway_na,
+            "runway_note": runway_note,
+            "request": request,
+            "title": "Insights",
+            "empty": False,
+            "latest_run_id": int(latest["id"]),
+            "latest_created_at": str(latest["created_at"]),
+            "prev_run_id": int(prev["id"]) if prev else None,
+            "prev_created_at": str(prev["created_at"]) if prev else None,
+            "new_alerts": new_alerts,
+            "cleared_alerts": cleared_alerts,
+            "delta": delta_display,
+            "latest_summary": latest_summary,
+            "prev_summary": prev_summary,
+            "quality" : quality,
+            "exec_summary": exec_summary,
+            "active_run_id": (active_run.get("id") if active_run else None),
+            "latest_run_id": (latest_run_actual.get("id") if latest_run_actual else None),
+            "run_qs": _run_qs(active_run, latest_run_actual),
+        },
+        fallback_title="Insights",
+        fallback_html="<p>Insights template missing.</p>",
+    )
+
+
+
+
+@app.get("/digest", response_class=RedirectResponse)
+def digest_redirect():
+    return RedirectResponse(url="/insights", status_code=302)
+
+
+@app.get("/insights/weekly", response_class=HTMLResponse)
+def weekly_insights(request: Request):
+    with db_conn() as conn:
+        unresolved = conn.execute(
+            """
+            SELECT alert_id, status, note, updated_at, last_score, last_seen_run_id
+            FROM alert_state
+            WHERE status != 'resolved'
+            ORDER BY
+              CASE status WHEN 'review' THEN 0 ELSE 1 END,
+              updated_at DESC
+            """
+        ).fetchall()
+
+        events = conn.execute(
+            """
+            SELECT created_at, alert_id, event_type, status, note, run_id
+            FROM alert_events
+            WHERE datetime(created_at) >= datetime('now', '-7 days')
+            ORDER BY created_at DESC
+            LIMIT 800
+            """
+        ).fetchall()
+
+    events_list = [dict(e) for e in events]
+    return _render_or_fallback(
+        request,
+        "weekly_digest.html",
+        {
+            "request": request,
+            "title": "Weekly Insights",
+            "unresolved": [dict(r) for r in unresolved],
+            "new_events": [e for e in events_list if e.get("event_type") == "auto_new"],
+            "reopened_events": [e for e in events_list if e.get("event_type") == "auto_reopened"],
+            "worsened_events": [e for e in events_list if e.get("event_type") == "auto_worsened"],
+            "resolved_events": [e for e in events_list if e.get("event_type") == "auto_resolved"],
+        },
+        fallback_title="Weekly Insights",
+        fallback_html="<p>Weekly digest template missing. Use <code>/api/alerts/events?days=7</code>.</p>",
+    )
+
+
+@app.get("/digest/weekly", response_class=RedirectResponse)
+def weekly_digest_redirect():
+    return RedirectResponse(url="/insights/weekly", status_code=302)
+
+
+# ----------------------------
+# Unified dashboard
+# ----------------------------
+@app.get("/dashboard", response_class=HTMLResponse)
+def unified_dashboard(request: Request, tab: str = "overview", run_id: Optional[int] = Query(None)):
+    active_run, latest_run_actual = _active_and_latest(request, run_id)
+
+    # Backward-compat: templates historically used `latest_run` as the primary snapshot.
+    # In run-context mode, we treat it as the *active* snapshot.
+    latest_run = active_run
+
+    with db_conn() as conn:
+        alert_rows = conn.execute(
+            """
+            WITH ev AS (
+                SELECT
+                    alert_id,
+                    MIN(created_at) AS first_seen,
+                    MAX(created_at) AS last_seen,
+                    SUM(CASE WHEN event_type = 'auto_reopened' THEN 1 ELSE 0 END) AS times_reopened,
+                    SUM(CASE WHEN event_type = 'auto_worsened' THEN 1 ELSE 0 END) AS times_worsened,
+                    SUM(CASE WHEN event_type = 'auto_resolved' THEN 1 ELSE 0 END) AS times_resolved,
+                    MAX(CASE WHEN event_type = 'user_feedback' THEN created_at ELSE NULL END) AS last_user_action_at,
+                    MAX(CASE WHEN event_type = 'user_feedback' THEN status ELSE NULL END) AS last_user_status
+                FROM alert_events
+                GROUP BY alert_id
+            )
+            SELECT
+                s.alert_id,
+                s.status AS current_status,
+                s.note AS current_note,
+                s.updated_at AS state_updated_at,
+                s.last_score,
+                s.last_seen_run_id,
+                ev.first_seen,
+                ev.last_seen,
+                COALESCE(ev.times_reopened, 0) AS times_reopened,
+                COALESCE(ev.times_worsened, 0) AS times_worsened,
+                COALESCE(ev.times_resolved, 0) AS times_resolved,
+                ev.last_user_action_at,
+                ev.last_user_status
+            FROM alert_state s
+            LEFT JOIN ev ON ev.alert_id = s.alert_id
+            ORDER BY
+                CASE s.status
+                    WHEN 'review' THEN 0
+                    WHEN 'expected' THEN 1
+                    WHEN 'actioned' THEN 2
+                    WHEN 'ignore' THEN 3
+                    WHEN 'snoozed' THEN 4
+                    WHEN 'resolved' THEN 5
+                    ELSE 6
+                END,
+                COALESCE(ev.last_seen, s.updated_at) DESC
+            """
+        ).fetchall()
+        alerts_overview = [dict(r) for r in alert_rows]
+
+        runs2 = conn.execute(
+            "SELECT id, created_at, summary_json, alerts_json FROM runs ORDER BY id DESC LIMIT 2"
+        ).fetchall()
+
+        digest: Dict[str, Any] = {
+            "latest_run_id": int(runs2[0]["id"]) if len(runs2) >= 1 else None,
+            "prev_run_id": int(runs2[1]["id"]) if len(runs2) >= 2 else None,
+            "new_alerts": [],
+            "cleared_alerts": [],
+            "delta": {},
+        }
+        if len(runs2) >= 1:
+            latest_alerts = {str(a.get("id")) for a in (safe_json_loads(runs2[0]["alerts_json"], []) or []) if isinstance(a, dict)}
+            prev_alerts = set()
+            if len(runs2) >= 2:
+                prev_alerts = {str(a.get("id")) for a in (safe_json_loads(runs2[1]["alerts_json"], []) or []) if isinstance(a, dict)}
+            digest["new_alerts"] = sorted(list(latest_alerts - prev_alerts))
+            digest["cleared_alerts"] = sorted(list(prev_alerts - latest_alerts))
+
+            latest_summary = safe_json_loads(runs2[0]["summary_json"], {}) or {}
+            prev_summary = safe_json_loads(runs2[1]["summary_json"], {}) if len(runs2) >= 2 else {}
+            for k in ["current_cash", "runway_days", "recent_income", "recent_expense", "income_change", "expense_change"]:
+                try:
+                    digest["delta"][k] = float(latest_summary.get(k, 0.0)) - float(prev_summary.get(k, 0.0))
+                except Exception:
+                    digest["delta"][k] = None
+
+        unresolved_rows = conn.execute(
+            """
+            SELECT alert_id, status, note, updated_at, last_score, last_seen_run_id
+            FROM alert_state
+            WHERE status != 'resolved'
+            ORDER BY
+              CASE status WHEN 'review' THEN 0 ELSE 1 END,
+              updated_at DESC
+            """
+        ).fetchall()
+        unresolved = [dict(r) for r in unresolved_rows]
+
+        week_events_rows = conn.execute(
+            """
+            SELECT created_at, alert_id, event_type, status, note, run_id
+            FROM alert_events
+            WHERE datetime(created_at) >= datetime('now', '-7 days')
+            ORDER BY created_at DESC
+            LIMIT 800
+            """
+        ).fetchall()
+        week_events = [dict(e) for e in week_events_rows]
+
+    return _render_or_fallback(
+        request,
+        "dashboard_unified.html",
+        {
+            "request": request,
+            "title": "Dashboard",
+            "tab": (tab or "overview").lower(),
+            "latest_run": latest_run,
+            "alerts_overview": alerts_overview,
+            "digest": digest,
+            "unresolved": unresolved,
+            "week_events": week_events,
+            "active_run_id": (latest_run.get('id') if latest_run else None),
+            "latest_run_id": (latest_run_actual.get('id') if latest_run_actual else None),
+            "run_qs": _run_qs(latest_run, latest_run_actual),
+        },
+        fallback_title="Dashboard",
+        fallback_html="<p>Dashboard template missing. Use <code>/run/&lt;id&gt;</code> or JSON endpoints under <code>/api</code>.</p>",
+    )
+
+
+@app.get("/run/{run_id}", response_class=HTMLResponse)
+def view_run(request: Request, run_id: int):
+    with db_conn() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        return HTMLResponse("Run not found", status_code=404)
+
+    try:
+        request.session["active_run_id"] = int(run_id)
+    except Exception:
+        pass
+
+    summary = safe_json_loads(row["summary_json"], {}) or {}
+    alerts = safe_json_loads(row["alerts_json"], []) or []
+    quality = safe_json_loads(row["quality_json"], {}) or {}
+    feedback = get_feedback_map(run_id)
+    state = get_alert_state_map()
+
+    alerts_display = _apply_effective_feedback(alerts, feedback, state)
+
+    return _render_or_fallback(
+        request,
+        "dashboard.html",
+        {
+            "request": request,
+            "title": "Dashboard",
+            "run_id": run_id,
+            "filename": row["filename"],
+            "created_at": row["created_at"],
+            "summary": summary,
+            "alerts": alerts_display,
+            "quality": quality,
+            "feedback": feedback,
+            "active_run_id": int(run_id),
+            "latest_run_id": _get_latest_run_id(),
+            "run_qs": f"?run_id={int(run_id)}" if (_get_latest_run_id() and int(run_id)!=int(_get_latest_run_id())) else "",
+        },
+        fallback_title=f"Run {run_id}",
+        fallback_html="<p>Run template missing. Use <code>/run/&lt;id&gt;/json</code>.</p>",
+    )
+
+
+@app.post("/run/{run_id}/feedback")
+def save_feedback(
+    run_id: int,
+    alert_id: str = Form(...),
+    status: str = Form(...),
+    note: str = Form(""),
+):
+    status = str(status).strip().lower()
+    if status not in {"expected", "actioned", "ignore", "snoozed", "review"}:
+        status = "review"
+    note_clean = str(note or "").strip()
+
+    score = 0.0
+    with db_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO alert_feedback (run_id, alert_id, status, note, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(run_id, alert_id) DO UPDATE SET
+                status=excluded.status,
+                note=excluded.note,
+                updated_at=excluded.updated_at
+            """,
+            (run_id, alert_id, status, note_clean, datetime.utcnow().isoformat()),
+        )
+        row = conn.execute("SELECT alerts_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+        alerts = safe_json_loads(row["alerts_json"], []) if row else []
+        if isinstance(alerts, list):
+            for a in alerts:
+                if isinstance(a, dict) and str(a.get("id")) == str(alert_id):
+                    score = float(alert_score(a))
+                    break
+        # Persist status across future runs (memory) + event
+        upsert_alert_state(alert_id=alert_id, status=status, note=note_clean, run_id=run_id, score=score, conn=conn)
+        insert_alert_event(run_id=run_id, alert_id=alert_id, event_type="user_feedback", status=status, note=note_clean, conn=conn)
+        conn.commit()
+
+    return RedirectResponse(url=f"/run/{run_id}", status_code=303)
+
+
+@app.get("/run/{run_id}/json")
+def run_json(run_id: int):
+    with db_conn() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        return JSONResponse({"error": "run not found"}, status_code=404)
+
+    return JSONResponse(
+        {
+            "id": int(row["id"]),
+            "created_at": row["created_at"],
+            "filename": row["filename"],
+            "params": safe_json_loads(row["params_json"], {}) or {},
+            "summary": safe_json_loads(row["summary_json"], {}) or {},
+            "alerts": safe_json_loads(row["alerts_json"], []) or [],
+            "quality": safe_json_loads(row["quality_json"], {}) or {},
+            "feedback": get_feedback_map(run_id),
+        }
+    )
+
+
+# ----------------------------
+# NEW: Strategies + SWOT/Opportunities (fixes the "strategies tab" crash)
+# ----------------------------
+def _rule_based_strategies(latest_run: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    if not latest_run:
+        return []
+
+    summary = latest_run.get("summary") or {}
+    alerts = latest_run.get("alerts") or []
+    currency = str(summary.get("currency", "AUD"))
+
+    strategies: List[Dict[str, Any]] = []
+    for a in alerts:
+        if not isinstance(a, dict):
+            continue
+        aid = str(a.get("id"))
+        if aid == "runway_tight":
+            strategies.append(
+                {
+                    "title": "14-day cash protection plan",
+                    "why": "Runway is below buffer. Protect cash and prevent surprise obligations.",
+                    "actions": [
+                        "Create a 14-day payment calendar (payroll, tax, rent, key suppliers).",
+                        "Negotiate deferrals on non-critical spend; pause discretionary expenses temporarily.",
+                        "Accelerate receivables: send reminders + offer immediate-payment option where appropriate.",
+                    ],
+                }
+            )
+        elif aid == "expense_spike":
+            strategies.append(
+                {
+                    "title": "Expense spike triage",
+                    "why": "Spending has jumped vs the prior period. Validate, isolate, and decide if structural.",
+                    "actions": [
+                        "Confirm whether spike is one-off (annual bill, stock build) vs a new baseline.",
+                        "Audit top category/vendor for the period; validate duplicates/errors.",
+                        "If baseline increased: update forecast + increase pricing/volume targets accordingly.",
+                    ],
+                }
+            )
+        elif aid == "revenue_drop":
+            strategies.append(
+                {
+                    "title": "Revenue recovery sprint",
+                    "why": "Income dropped vs prior period. Determine timing vs demand and respond fast.",
+                    "actions": [
+                        "Segment: late invoicing vs fewer sales. Use invoices/AR where available.",
+                        "Re-activate warm leads and upsell existing customers in the next 7–14 days.",
+                        "If pipeline issue: focus on 1–2 channels and tighten weekly cadence (targets + actions).",
+                    ],
+                }
+            )
+        elif aid == "overdue_receivables":
+            strategies.append(
+                {
+                    "title": "AR collections playbook",
+                    "why": "Overdue receivables create cash timing risk.",
+                    "actions": [
+                        "Call top 3 overdue accounts first; agree exact payment date/time.",
+                        "Introduce staged reminders (pre-due, due, +7, +14).",
+                        "Consider deposits/part-payments for new work if chronic overdue persists.",
+                    ],
+                }
+            )
+        elif aid == "expense_concentration":
+            strategies.append(
+                {
+                    "title": "Supplier dependency risk reduction",
+                    "why": "High concentration increases disruption and pricing risk.",
+                    "actions": [
+                        "Confirm terms and upcoming price changes with key supplier(s).",
+                        "Identify a secondary supplier for critical items over the next quarter.",
+                        "Track concentration monthly and set a 'max share' guideline.",
+                    ],
+                }
+            )
+
+    # Always include one generic "operating rhythm" strategy
+    strategies.append(
+        {
+            "title": "Weekly CFO rhythm (15 minutes)",
+            "why": "Turns this app into a habit, not a dashboard you forget.",
+            "actions": [
+                "Review: cash runway, top alerts, and invoice/AR movement.",
+                "Pick 1 action for this week (collections, pricing, cost, pipeline).",
+                "Update 1 assumption (next month expense, next month sales) to keep forecasts honest.",
+            ],
+        }
+    )
+
+    # De-duplicate by title
+    seen = set()
+    uniq = []
+    for s in strategies:
+        t = s.get("title")
+        if t in seen:
+            continue
+        seen.add(t)
+        uniq.append(s)
+    return uniq
+
+
+@app.get("/strategies", response_class=HTMLResponse)
+def strategies_page(request: Request):
+    active_id = _get_active_run_id(request, None)
+    latest = _latest_run_snapshot()
+    active = _run_snapshot(active_id) if active_id is not None else None
+    chosen = active or latest
+    strategies = _rule_based_strategies(chosen)
+
+    return _render_or_fallback(
+    request,
+    "strategies.html",
+    {"request": request, "title": "Strategies", "latest_run": chosen, "strategies": strategies},
+    fallback_title="Strategies",
+    fallback_html="".join([
+        "<p><strong>Rule-based, explainable strategies</strong> "
+        "(demo-safe; no external AI required).</p>",
+        "".join(
+            (
+                "<div style='margin:16px 0; padding:12px; border:1px solid #ddd; border-radius:12px;'>"
+                f"<h3 style='margin:0 0 6px 0;'>{s['title']}</h3>"
+                f"<p style='margin:0 0 8px 0; color:#333;'>{s['why']}</p>"
+                "<ul>"
+                + "".join(f"<li>{a}</li>" for a in s["actions"])
+                + "</ul>"
+                "</div>"
+            )
+            for s in strategies
+        ),
+        "<p style='color:#666;'>Not financial advice. Intended as decision support; "
+        "verify against your records.</p>",
+    ]),
+)
+
+
+@app.get("/swot", response_class=HTMLResponse)
+def swot_page(request: Request):
+    active_id = _get_active_run_id(request, None)
+    latest = _latest_run_snapshot()
+    active = _run_snapshot(active_id) if active_id is not None else None
+    chosen = active or latest
+    if not chosen:
+        return _render_or_fallback(
+            request,
+            "swot.html",
+            {"request": request, "title": "SWOT", "empty": True},
+            fallback_title="SWOT",
+            fallback_html="<p>No run yet. Upload a CSV first.</p>",
+        )
+
+    s = chosen.get("summary") or {}
+    income_change = float(s.get("income_change") or 0.0)
+    expense_change = float(s.get("expense_change") or 0.0)
+    runway = float(s.get("runway_days") or 0.0)
+
+    strengths = []
+    opportunities = []
+    threats = []
+
+    # STRENGTHS: Positive observations
+    if income_change > 0.05:
+        strengths.append("Revenue trend is improving vs prior period.")
+    if expense_change < -0.05:
+        strengths.append("Expenses are trending down vs prior period (margin improving).")
+    if runway > 60:
+        strengths.append("Runway looks healthy given current burn profile.")
+    
+    # Add a strength if no critical alerts
+    alerts = chosen.get("alerts") or []
+    critical_alerts = [a for a in alerts if isinstance(a, dict) and a.get("severity") == "critical"]
+    if not critical_alerts:
+        strengths.append("No critical financial alerts triggered in current dataset.")
+
+    # OPPORTUNITIES: Things to improve or leverage
+    opportunities.append("Automate collections rhythm (AR reminders) to pull cash forward.")
+    opportunities.append("Increase categorisation/vendor mapping to unlock sharper insights.")
+    opportunities.append("Pilot an integration feed (Xero/Stripe/Shopify) for automatic daily updates (scaffold ready).")
+    
+    # Add opportunity if revenue is growing
+    if income_change > 0.15:
+        opportunities.append("Revenue growth momentum could support pricing review or capacity expansion.")
+
+    # THREATS: External risks and structural issues
+    threats.append("Supplier dependency/concentration can spike cost or disrupt operations.")
+    threats.append("Late payments can compound into a runway event quickly.")
+    threats.append("Short history window can hide seasonality; keep adding data over time.")
+    
+    # Add threat if cash runway is tight
+    if runway < 30:
+        threats.append("Limited cash buffer leaves little room for unexpected expenses or revenue delays.")
+
+    payload = {
+        "strengths": strengths,
+        "opportunities": opportunities,
+        "threats": threats,
+    }
+
+    return _render_or_fallback(
+        request,
+        "swot.html",
+        {"request": request, "title": "SWOT", "latest_run": chosen, "swot": payload, "empty": False},
+        fallback_title="SWOT (Auto)",
+        fallback_html="".join([
+            "<p><strong>Automated SWOT</strong> (based on your latest run; deterministic).</p>",
+            "".join(
+                (
+                    f"<h3 style='margin-top:18px;'>{k.title()}</h3>"
+                    "<ul>"
+                    + "".join(f"<li>{x}</li>" for x in v)
+                    + "</ul>"
+                )
+                for k, v in payload.items()
+            ),
+            "<p style='color:#666;'>Not advice; use as a structured prompt for review. "
+            "Weaknesses are covered by the Alerts page.</p>",
+        ]),
+    )
+
+
+# ----------------------------
+# NEW: Integrations scaffold (API + simple page)
+# ----------------------------
+@app.get("/integrations", response_class=HTMLResponse)
+def integrations_page(request: Request):
+    s = read_settings()
+    with db_conn() as conn:
+        cols = set(_table_columns(conn, "integrations"))
+        if {"last_sync_at", "last_sync_status", "last_sync_note"}.issubset(cols):
+            rows = conn.execute(
+                "SELECT provider, is_enabled, config_json, updated_at, "
+                "last_sync_at, last_sync_status, last_sync_note "
+                "FROM integrations ORDER BY provider"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT provider, is_enabled, config_json, updated_at "
+                "FROM integrations ORDER BY provider"
+            ).fetchall()
+
+    items = [
+        {
+            "provider": str(r["provider"]),
+            "is_enabled": bool(r["is_enabled"]),
+            "config": safe_json_loads(r["config_json"], {}) or {},
+            "updated_at": str(r["updated_at"]),
+            "last_sync_at": str(r["last_sync_at"]) if "last_sync_at" in r.keys() else None,
+            "last_sync_status": str(r["last_sync_status"]) if "last_sync_status" in r.keys() else None,
+            "last_sync_note": str(r["last_sync_note"]) if "last_sync_note" in r.keys() else None,
+        }
+        for r in rows
+    ]
+
+    return _render_or_fallback(
+        request,
+        "integrations.html",
+        {"request": request, "title": "Integrations", "s": s, "integrations": items},
+        fallback_title="Integrations (Scaffold)",
+        fallback_html="".join([
+            "<p>This is a <strong>demo-safe scaffold</strong>: no API keys required. "
+            "It shows how the product will support automatic data feeds.</p>",
+            "<ul>",
+            "".join(
+                f"<li><strong>{i['provider']}</strong> — "
+                f"{'Enabled' if i['is_enabled'] else 'Disabled'} "
+                f"<span style='color:#666'>(updated {human_dt(i['updated_at'])})</span></li>"
+                for i in items
+            ),
+            "</ul>",
+            "<p>Next step (post-demo): implement OAuth + scheduled sync jobs per provider.</p>",
+        ]),
+    )
+
+
+
+# ----------------------------
+# NEW: Categorisation Rules API (demo-safe, deterministic)
+# ----------------------------
+@app.get("/api/rules", response_class=JSONResponse)
+def api_rules():
+    with db_conn() as conn:
+        vendor = _load_vendor_rules(conn)
+        desc = _load_description_rules(conn)
+    return JSONResponse({"vendor_rules": vendor, "description_rules": desc})
+
+
+@app.post("/api/rules/vendor", response_class=JSONResponse)
+def api_add_vendor_rule(
+    vendor: str = Form(...),
+    category: str = Form(...),
+    match_type: str = Form("equals"),
+    priority: int = Form(100),
+    is_enabled: Any = Form(True),
+    note: str = Form(""),
+):
+    v = _safe_text(vendor, MAX_RULE_TEXT_LEN).strip()
+    c = _safe_text(category, MAX_RULE_TEXT_LEN).strip() or "Uncategorised"
+    mt = _safe_match_type(match_type, {"equals", "contains", "startswith"}, "equals")
+    pr = _clamp_int(priority, 0, 10_000, 100)
+    en = 1 if _parse_bool(is_enabled, True) else 0
+    n = _safe_text(note, 500)
+    if not v:
+        return JSONResponse({"error": "vendor required"}, status_code=400)
+    with db_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO vendor_rules (vendor, match_type, category, is_enabled, priority, note, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (v, mt, c, en, pr, n, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/rules/description", response_class=JSONResponse)
+def api_add_description_rule(
+    pattern: str = Form(...),
+    category: str = Form(...),
+    match_type: str = Form("contains"),
+    priority: int = Form(100),
+    is_enabled: Any = Form(True),
+    note: str = Form(""),
+):
+    p = _safe_text(pattern, MAX_RULE_TEXT_LEN).strip()
+    c = _safe_text(category, MAX_RULE_TEXT_LEN).strip() or "Uncategorised"
+    mt = _safe_match_type(match_type, {"equals", "contains", "startswith", "regex"}, "contains")
+    pr = _clamp_int(priority, 0, 10_000, 100)
+    en = 1 if _parse_bool(is_enabled, True) else 0
+    n = _safe_text(note, 500)
+    if not p:
+        return JSONResponse({"error": "pattern required"}, status_code=400)
+    with db_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO description_rules (pattern, match_type, category, is_enabled, priority, note, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (p, mt, c, en, pr, n, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/rules/vendor/{rule_id}/delete", response_class=JSONResponse)
+def api_delete_vendor_rule(rule_id: int):
+    with db_conn() as conn:
+        conn.execute("DELETE FROM vendor_rules WHERE id = ?", (int(rule_id),))
+        conn.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/rules/description/{rule_id}/delete", response_class=JSONResponse)
+def api_delete_description_rule(rule_id: int):
+    with db_conn() as conn:
+        conn.execute("DELETE FROM description_rules WHERE id = ?", (int(rule_id),))
+        conn.commit()
+    return JSONResponse({"ok": True})
+
+
+# ----------------------------
+# NEW: Cheap + legal ingestion testing (no paid APIs)
+# ----------------------------
+def _generate_synthetic_transactions(seed: int = 42, days: int = 120, rows_per_day: int = 8) -> pd.DataFrame:
+    rng = np.random.default_rng(int(seed))
+    days = max(14, min(int(days), 3660))
+    rows_per_day = max(1, min(int(rows_per_day), 200))
+    end = pd.Timestamp.utcnow().normalize()
+    start = end - pd.Timedelta(days=days - 1)
+    dates = pd.date_range(start, end, freq="D")
+
+    vendors_exp = ["Officeworks", "Woolworths", "Telstra", "AWS", "Uber", "Bunnings", "Xero", "Google Ads", "Meta Ads"]
+    vendors_inc = ["Client A", "Client B", "Shopify Payout", "Stripe Payout", "Square Payout"]
+    cats_exp = ["Rent", "Utilities", "Software", "Marketing", "Supplies", "Travel", "Contractors"]
+    cats_inc = ["Sales"]
+
+    rows = []
+    for d in dates:
+        for _ in range(rows_per_day):
+            is_expense = bool(rng.random() < 0.72)
+            if is_expense:
+                vendor = str(rng.choice(vendors_exp))
+                category = str(rng.choice(cats_exp))
+                amt = float(np.round(rng.lognormal(mean=4.0, sigma=0.6), 2))
+                amt = -amt
+                ttype = "expense"
+                desc = f"{vendor} - {category}"
+            else:
+                vendor = str(rng.choice(vendors_inc))
+                category = str(rng.choice(cats_inc))
+                amt = float(np.round(rng.lognormal(mean=5.0, sigma=0.7), 2))
+                ttype = "income"
+                desc = f"{vendor} - invoice payment"
+            rows.append(
+                {
+                    "date": str(pd.Timestamp(d).date()),
+                    "amount": amt,
+                    "type": ttype,
+                    "category": "Uncategorised",  # force rule engine to show value
+                    "counterparty": vendor if rng.random() > 0.05 else "Unknown",
+                    "description": desc,
+                }
+            )
+    df = pd.DataFrame(rows)
+    return df
+
+
+@app.get("/dev/generate-sample", response_class=PlainTextResponse)
+def dev_generate_sample(seed: int = 42, days: int = 120, rows_per_day: int = 8):
+    """Download a demo CSV (cheap + legal)."""
+    df = _generate_synthetic_transactions(seed=seed, days=days, rows_per_day=rows_per_day)
+    csv = df.to_csv(index=False)
+    return PlainTextResponse(csv, media_type="text/csv")
+
+
+@app.post("/api/ingest/local", response_class=JSONResponse)
+def api_ingest_local(path: str = Form(...), provider: str = Form("local_drop")):
+    """Ingest a CSV from demo_data/ only (safe path)."""
+    s = read_settings()
+    demo_mode = bool(_parse_bool(s.get("demo_mode", True), default=True))
+    if not demo_mode:
+        return JSONResponse({"error": "local ingest disabled outside demo_mode"}, status_code=403)
+
+    rel = _safe_text(path, 200).strip().lstrip("/").lstrip("\\")
+    if not rel:
+        return JSONResponse({"error": "path required"}, status_code=400)
+    # Force within DEMO_DATA_DIR
+    DEMO_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    full = (DEMO_DATA_DIR / rel).resolve()
+    if DEMO_DATA_DIR.resolve() not in full.parents and full != DEMO_DATA_DIR.resolve():
+        return JSONResponse({"error": "invalid path"}, status_code=400)
+    if not full.exists() or not full.is_file():
+        return JSONResponse({"error": "file not found in demo_data/"}, status_code=404)
+    if full.suffix.lower() not in {".csv"}:
+        return JSONResponse({"error": "only .csv allowed"}, status_code=400)
+
+    content = full.read_bytes()
+    if len(content) > MAX_UPLOAD_BYTES:
+        return JSONResponse({"error": "file too large for demo"}, status_code=413)
+
+    settings_hash = _hash_settings(s)
+    file_sha = hashlib.sha256(content).hexdigest()
+
+    raw_df = pd.read_csv(io.BytesIO(content), nrows=MAX_UPLOAD_ROWS + 1)
+    if isinstance(raw_df, pd.DataFrame) and len(raw_df) > MAX_UPLOAD_ROWS:
+        return JSONResponse({"error": f"too many rows (max {MAX_UPLOAD_ROWS:,})"}, status_code=400)
+
+    df = normalise_csv(raw_df)
+    contract = _ledger_contract_report(df)
+    with db_conn() as conn:
+        df, cat_report = apply_deterministic_categorisation(df, s, conn)
+    summary, alerts, quality = build_summary_and_alerts(df, s)
+    alerts_payload = [a.__dict__ for a in alerts]
+
+    params = _build_run_params(
+        settings=s,
+        source=_safe_source_block(provider, "local_file", {"path": str(rel)}),
+        contract=contract,
+        cat_report=cat_report,
+    )
+
+    with db_conn() as conn:
+        run_id = _insert_run_row(
+            conn=conn,
+            created_at=datetime.utcnow().isoformat(),
+            filename=str(full.name),
+            params_json=json.dumps(params),
+            summary_json=json.dumps(summary),
+            alerts_json=json.dumps(alerts_payload),
+            quality_json=json.dumps(quality),
+            file_sha256=file_sha,
+            settings_hash=settings_hash,
+        )
+        conn.commit()
+    try:
+        update_alert_memory_for_run(int(run_id), alerts_payload)
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "run_id": int(run_id), "alerts": alerts_payload})
+
+
+@app.post("/api/ingest/simulate", response_class=JSONResponse)
+def api_ingest_simulate(
+    seed: int = Form(42),
+    days: int = Form(120),
+    rows_per_day: int = Form(8),
+    provider: str = Form("synthetic"),
+):
+    """Generate synthetic data and ingest as a run (cheap + legal)."""
+    s = read_settings()
+    df = _generate_synthetic_transactions(seed=seed, days=days, rows_per_day=rows_per_day)
+    df = normalise_csv(df)
+    contract = _ledger_contract_report(df)
+    with db_conn() as conn:
+        df, cat_report = apply_deterministic_categorisation(df, s, conn)
+    summary, alerts, quality = build_summary_and_alerts(df, s)
+    alerts_payload = [a.__dict__ for a in alerts]
+
+    tx_bytes = df.to_csv(index=False).encode("utf-8")
+    file_sha = hashlib.sha256(tx_bytes).hexdigest()
+    settings_hash = _hash_settings(s)
+
+    params = _build_run_params(
+        settings=s,
+        source=_safe_source_block(provider, "synthetic_generator", {"note": f"seed={seed},days={days},rpd={rows_per_day}"}),
+        contract=contract,
+        cat_report=cat_report,
+    )
+    with db_conn() as conn:
+        run_id = _insert_run_row(
+            conn=conn,
+            created_at=datetime.utcnow().isoformat(),
+            filename=f"{provider}_synthetic.csv",
+            params_json=json.dumps(params),
+            summary_json=json.dumps(summary),
+            alerts_json=json.dumps(alerts_payload),
+            quality_json=json.dumps(quality),
+            file_sha256=file_sha,
+            settings_hash=settings_hash,
+        )
+        conn.commit()
+    try:
+        update_alert_memory_for_run(int(run_id), alerts_payload)
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "run_id": int(run_id), "alerts": alerts_payload})
+
+
+@app.get("/api/latest", response_class=JSONResponse)
+def api_latest():
+    latest = _latest_run_snapshot()
+    return JSONResponse({"latest": latest})
+
+
+@app.get("/api/runs", response_class=JSONResponse)
+def api_runs(limit: int = 50):
+    limit = max(1, min(int(limit), 200))
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, created_at, filename, summary_json, quality_json FROM runs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    out = []
+    for r in rows:
+        summary = safe_json_loads(r["summary_json"], {}) or {}
+        quality = safe_json_loads(r["quality_json"], {}) or {}
+        out.append(
+            {
+                "id": int(r["id"]),
+                "created_at": str(r["created_at"]),
+                "filename": str(r["filename"]),
+                "end_date": summary.get("end_date"),
+                "currency": summary.get("currency", "AUD"),
+                "current_cash": float(summary.get("current_cash", 0.0)),
+                "runway_days": float(summary.get("runway_days", 0.0)),
+                "quality_score": float(quality.get("score", 0.0)),
+            }
+        )
+    return JSONResponse({"runs": out})
+
+
+@app.get("/api/alerts/state", response_class=JSONResponse)
+def api_alert_state():
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT alert_id, status, note, updated_at, last_score, last_seen_run_id FROM alert_state ORDER BY updated_at DESC"
+        ).fetchall()
+    return JSONResponse({"alerts": [dict(r) for r in rows]})
+
+
+@app.get("/api/alerts/events", response_class=JSONResponse)
+def api_alert_events(days: int = 7):
+    days = max(1, min(int(days), 90))
+    with db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT created_at, run_id, alert_id, event_type, status, note
+            FROM alert_events
+            WHERE datetime(created_at) >= datetime('now', ?)
+            ORDER BY created_at DESC
+            LIMIT 2000
+            """,
+            (f"-{days} days",),
+        ).fetchall()
+    return JSONResponse({"events": [dict(r) for r in rows], "days": days})
+
+
+@app.post("/api/webhook/transactions", response_class=JSONResponse)
+async def api_webhook_transactions(request: Request):
+    """Integration ingest endpoint (scaffold).
+
+    POST JSON:
+      {
+        "secret": "...",
+        "provider": "xero|stripe|shopify|...",
+        "transactions": [ ... ]
+      }
+
+    For demo: we only validate secret and store as a 'run' if transactions are in CSV-like format.
+    """
+    s = read_settings()
+    # Demo safety: basic request size guard (prevents accidental DoS via huge JSON).
+    try:
+        cl = request.headers.get("content-length")
+        if cl is not None and int(cl) > MAX_WEBHOOK_BYTES:
+            return JSONResponse({"error": "payload too large"}, status_code=413)
+    except Exception:
+        pass
+
+    body = await request.json()
+    secret = str(body.get("secret") or "")
+    if secret != str(s.get("webhook_secret")):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    provider = str(body.get("provider") or "unknown")
+    tx = body.get("transactions") or []
+    if not isinstance(tx, list) or len(tx) == 0:
+        return JSONResponse({"error": "missing transactions[]"}, status_code=400)
+    if len(tx) > MAX_UPLOAD_ROWS:
+        return JSONResponse(
+            {"error": f"too many transactions for demo (max {MAX_UPLOAD_ROWS:,})"},
+            status_code=400,
+        )
+    # Expect each txn dict to already be in our normalized shape, or close.
+    df = pd.DataFrame(tx)
+    try:
+        df = normalise_csv(df)
+        contract = _ledger_contract_report(df)
+        with db_conn() as conn:
+            df, cat_report = apply_deterministic_categorisation(df, s, conn)
+        summary, alerts, quality = build_summary_and_alerts(df, s)
+    except Exception as e:
+        logger.info("Webhook parse/analyse failed: %s", e)
+        return JSONResponse(
+            {"error": "parse/analyse failed (invalid transaction format or missing required fields)"},
+            status_code=400,
+        )
+
+    payload = [a.__dict__ for a in alerts]
+    params = _build_run_params(
+        settings=s,
+        source=_safe_source_block(provider, "webhook_scaffold"),
+        contract=contract,
+        cat_report=cat_report,
+    )
+
+    with db_conn() as conn:
+        run_id = _insert_run_row(
+            conn=conn,
+            created_at=datetime.utcnow().isoformat(),
+            filename=f"{provider}_webhook.json",
+            params_json=json.dumps(params),
+            summary_json=json.dumps(summary),
+            alerts_json=json.dumps(payload),
+            quality_json=json.dumps(quality),
+            file_sha256=hashlib.sha256(json.dumps(tx, sort_keys=True).encode("utf-8")).hexdigest(),
+            settings_hash=_hash_settings(s),
+        )
+        conn.commit()
+
+
+    try:
+        update_alert_memory_for_run(int(run_id), payload)
+    except Exception:
+        pass
+
+    return JSONResponse({"ok": True, "run_id": int(run_id), "alerts": payload})
+
+
+@app.post("/api/integrations/{provider}/sync_now", response_class=JSONResponse)
+def api_integration_sync_now(provider: str):
+    """Demo-safe integration sync. No real APIs.
+
+    Behavior:
+      - If demo_data/<provider>.csv exists: ingest it via local ingest path
+      - Else: generate synthetic data and ingest
+      - Updates integrations.last_sync_* fields (if present)
+    """
+    p = str(provider or "").strip().lower()
+    if not p:
+        return JSONResponse({"error": "provider required"}, status_code=400)
+    s = read_settings()
+    DEMO_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    candidate = (DEMO_DATA_DIR / f"{p}.csv")
+    sync_status = "ok"
+    sync_note = ""
+    run_id: Optional[int] = None
+    try:
+        if candidate.exists():
+            # ingest local file
+            resp = api_ingest_local(path=candidate.name, provider=p)
+            if isinstance(resp, JSONResponse):
+                data = safe_json_loads(resp.body, {}) if hasattr(resp, "body") else {}
+                run_id = int(data.get("run_id")) if isinstance(data, dict) and data.get("run_id") is not None else None
+        else:
+            resp = api_ingest_simulate(seed=42, days=120, rows_per_day=8, provider=p)
+            if isinstance(resp, JSONResponse):
+                data = safe_json_loads(resp.body, {}) if hasattr(resp, "body") else {}
+                run_id = int(data.get("run_id")) if isinstance(data, dict) and data.get("run_id") is not None else None
+            sync_note = "No provider CSV found in demo_data/, used synthetic generator."
+    except Exception as e:
+        sync_status = "error"
+        sync_note = _safe_text(str(e), 180)
+
+    with db_conn() as conn:
+        cols = set(_table_columns(conn, "integrations"))
+        if {"last_sync_at", "last_sync_status", "last_sync_note"}.issubset(cols):
+            conn.execute(
+                """
+                UPDATE integrations
+                SET last_sync_at = ?, last_sync_status = ?, last_sync_note = ?, updated_at = ?
+                WHERE provider = ?
+                """,
+                (datetime.utcnow().isoformat(), sync_status, sync_note, datetime.utcnow().isoformat(), p),
+            )
+        conn.execute(
+            "UPDATE integrations SET updated_at = ? WHERE provider = ?",
+            (datetime.utcnow().isoformat(), p),
+        )
+        conn.commit()
+    return JSONResponse({"ok": sync_status == "ok", "provider": p, "run_id": run_id, "status": sync_status, "note": sync_note})
+
+
+
+if __name__ == "__main__":
+    # Optional convenience runner:
+    #   python app.py
+    # Still recommended for dev:
+    #   uvicorn app:app --reload
+    import uvicorn
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)

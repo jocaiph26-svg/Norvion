@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="header">
+    <div>
+      <h1 class="h1">History</h1>
+      <p class="sub">Saved runs (stored snapshots).</p>
+    </div>
+  </div>
+  <style>
+    .clickrow { cursor: pointer; }
+    .clickrow:hover { background: rgba(2,6,23,0.03); }
+  </style>
+
+  {% if runs and runs|length > 0 %}
+    <div class="card">
+      <div class="card-b" style="padding:0;">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Date (UTC)</th>
+              <th>File</th>
+              <th>Period end</th>
+              <th>Cash</th>
+              <th>Runway</th>
+              <th>Quality</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for r in runs %}
+            <tr class="clickrow" onclick="window.location='/run/{{ r.id }}'">
+              <td class="mono">{{ r.created_at|humandt }}</td>
+              <td style="font-weight:800;">
+                {{ r.filename }}
+                {% if latest_run_id and r.id != latest_run_id %}
+                  <span class="badge muted" style="margin-left:6px;">Snapshot</span>
+                {% endif %}
+              </td>
+              <td>{{ r.end_date }}</td>
+              <td>{{ r.current_cash | money(r.currency) }}</td>
+              <td>
+                {% if r.runway_days is not none and r.runway_days <= 0 %}
+                  ≤0 days
+                {% elif r.runway_days is not none %}
+                  {{ '%.0f'|format(r.runway_days) }} days
+                {% endif %}
+              </td>
+              <td style="font-weight:900;">
+                {% if r.quality_score is not none %}
+                  {{ '%.0f'|format(r.quality_score) }}/100{% if r.quality_band %} ({{ r.quality_band }}){% endif %}
+                {% endif %}
+              </td>
+              <td><a class="btn btn-sm btn-ghost" href="/run/{{ r.id }}">Open</a></td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {% else %}
+    <div class="card">
+      <div class="card-b">
+        <div class="empty">
+          <div class="empty-title">No runs yet</div>
+          <div class="empty-sub">
+            Upload a CSV file to generate your first run. Each run is stored here
+            for audit review. Use the Upload CSV button in the top bar.
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}

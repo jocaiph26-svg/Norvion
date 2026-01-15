@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block content %}
+  {% set run_link_id = active_run_id if active_run_id else (latest_run_id if latest_run_id else None) %}
+  <div class="header">
+    <div>
+      <h1 class="h1">Settings (read-only)</h1>
+      <p class="sub">Upload-time defaults are stored per run. Updates are disabled in this environment.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Current defaults (stored)</h2>
+      <div class="hr"></div>
+      <table style="width:100%; border-collapse:collapse;">
+        <tbody>
+          <tr><td style="padding:6px 0; font-weight:800;">Currency</td><td style="padding:6px 0;">{{ s.currency }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Starting cash</td><td style="padding:6px 0;">{{ s.starting_cash|money(s.currency) }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Window days</td><td style="padding:6px 0;">{{ s.window_days }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Burn days</td><td style="padding:6px 0;">{{ s.burn_days }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Low cash buffer days</td><td style="padding:6px 0;">{{ s.low_cash_buffer_days }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Expense spike threshold</td><td style="padding:6px 0;">{{ s.expense_spike_pct }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Revenue drop threshold</td><td style="padding:6px 0;">{{ s.revenue_drop_pct }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Concentration threshold</td><td style="padding:6px 0;">{{ s.concentration_threshold }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Large transaction sigma</td><td style="padding:6px 0;">{{ s.large_txn_sigma }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Recurring expense min hits</td><td style="padding:6px 0;">{{ s.recurring_min_hits }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Overdue grace days</td><td style="padding:6px 0;">{{ s.overdue_days }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Recent compare days</td><td style="padding:6px 0;">{{ s.recent_compare_days }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Demo mode</td><td style="padding:6px 0;">{{ "True" if s.demo_mode else "False" }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Integrations scaffold</td><td style="padding:6px 0;">{{ "True" if s.enable_integrations_scaffold else "False" }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <details style="margin-top:16px;">
+    <summary style="cursor:pointer; font-weight:900;">Technical / audit details (stored)</summary>
+    <div style="height:10px;"></div>
+    {% if settings_scope is defined %}
+      <div class="card">
+        <div class="card-b">
+          <h2>Settings metadata (stored)</h2>
+          <div class="hr"></div>
+          <table style="width:100%; border-collapse:collapse;">
+            <tbody>
+              <tr>
+                <td style="padding:6px 0; font-weight:800;">Scope</td>
+                <td style="padding:6px 0;"><span class="mono">{{ settings_scope }}</span></td>
+              </tr>
+              <tr>
+                <td style="padding:6px 0; font-weight:800;">Hash</td>
+                <td style="padding:6px 0;"><span class="mono">{{ settings_hash }}</span></td>
+              </tr>
+              {% if s.config_version %}
+                <tr>
+                  <td style="padding:6px 0; font-weight:800;">Config version</td>
+                  <td style="padding:6px 0;"><span class="mono">{{ s.config_version }}</span></td>
+                </tr>
+              {% endif %}
+              {% if settings_updated_at %}
+                <tr>
+                  <td style="padding:6px 0; font-weight:800;">Updated</td>
+                  <td style="padding:6px 0;"><span class="mono">{{ settings_updated_at|humandt }}</span></td>
+                </tr>
+              {% endif %}
+            </tbody>
+          </table>
+          {% if settings_scope == "global_fallback" %}
+            <div class="small" style="margin-top:8px; color:var(--muted);">
+              This tenant is using global defaults. Changes are disabled here.
+            </div>
+          {% endif %}
+        </div>
+      </div>
+      <div style="height:12px;"></div>
+    {% endif %}
+
+    <div class="card">
+      <div class="card-b">
+        <h2>API endpoints available (read-only)</h2>
+        <p class="sub" style="margin-top:6px;">Writes are disabled in audit mode.</p>
+        <ul style="margin:10px 0 0 18px;">
+          <li><a class="link" href="/api/ui/dashboard">/api/ui/dashboard</a></li>
+          {% if run_link_id %}
+            <li><a class="link" href="/api/ui/run/{{ run_link_id }}">/api/ui/run/{{ run_link_id }}</a></li>
+          {% endif %}
+          <li><a class="link" href="/api/ui/history">/api/ui/history</a></li>
+          <li><a class="link" href="/api/ui/alerts">/api/ui/alerts</a></li>
+          <li><a class="link" href="/api/ui/access/events">/api/ui/access/events</a></li>
+        </ul>
+      </div>
+    </div>
+  </details>
+{% endblock %}

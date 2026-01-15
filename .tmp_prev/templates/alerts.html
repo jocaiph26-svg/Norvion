@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="header">
+    <div>
+      <h1 class="h1">Alerts</h1>
+      <p class="sub">Treat this like a lightweight control panel — make a call, leave a note, and the system keeps the audit trail.</p>
+    </div>
+    {% if latest_run %}
+    {% if active_run_id is defined and latest_run_id is defined and active_run_id and latest_run_id and (active_run_id != latest_run_id) %}
+      <div class="badge">Viewing run <strong style="margin-left:6px;">{{ active_run_id }}</strong> • {{ latest_run.created_at|humandt }}</div>
+    {% else %}
+      <div class="badge">Latest data: <strong style="margin-left:6px;">Run {{ latest_run.id }}</strong> • {{ latest_run.created_at|humandt }}</div>
+    {% endif %}
+    {% endif %}
+  </div>
+
+  {# GLOBAL EMPTY STATE: no run or nothing to show at all #}
+  {% if (not latest_run) and ((needs_attention|length == 0) and (all_active|length == 0)) %}
+    <div class="card">
+      <div class="card-b">
+        <div class="empty">
+          <div class="empty-title">No alerts yet</div>
+          <div class="empty-sub">
+            Upload a CSV to generate your first run. Alerts will appear here when something needs attention,
+            and you’ll be able to track notes and decisions over time.
+          </div>
+          <a class="btn primary" href="/upload">Upload CSV</a>
+        </div>
+      </div>
+    </div>
+  {% else %}
+
+    <div class="card">
+      <div class="card-b">
+        <h2>Needs attention now</h2>
+        <p class="sub" style="margin-top:6px;">Top signals to review next (limited to 5 to keep focus).</p>
+        <div class="hr"></div>
+
+        {% if needs_attention|length == 0 %}
+          <div class="callout">
+            <strong>No urgent items.</strong> Nothing requires immediate review right now.
+            {% if all_active|length > 0 %}Active items (if any) are listed below.{% endif %}
+          </div>
+        {% else %}
+          <div class="grid">
+            {% for a in needs_attention %}
+              {% set aid = a.alert_id if a.alert_id is defined and a.alert_id else a.id %}
+              <div class="alert">
+                <div class="badge {{ 'crit' if a.severity=='critical' else ('warn' if a.severity=='warning' else 'info') }}">{{ a.severity|upper }}</div>
+                <div class="meta">
+                  <p class="title">{{ a.title }}</p>
+                  <p class="why">{{ a.why }}</p>
+                  {# Severity explanation #}
+                  <p class="small">
+                    {% if a.severity == 'critical' %}
+                      <strong>Critical:</strong> Material condition observed in the data.
+                    {% elif a.severity == 'warning' %}
+                      <strong>Warning:</strong> Notable change or pattern observed in the data.
+                    {% elif a.severity == 'info' %}
+                      <strong>Info:</strong> Informational signal; no material change detected.
+                    {% endif %}
+                  </p>
+                  {# Why didn't this fire explanation (compact) #}
+                  {% if a.not_triggered_reason %}
+                    <p class="small" style="color:var(--muted);">{{ a.not_triggered_reason }}</p>
+                  {% elif a.suppression_reason %}
+                    <p class="small" style="color:var(--muted);">Suppressed: {{ a.suppression_reason }}</p>
+                  {% else %}
+                    <p class="small" style="color:var(--muted);">Not enough information is available to explain why this check did not trigger for this dataset.</p>
+                  {% endif %}
+                  {% if a.quality_context %}
+                    <p class="small" style="color:var(--muted);">
+                      Data quality: {{ '%.0f'|format(a.quality_context.score if a.quality_context.score is not none else 0) }}/100
+                      (threshold {{ a.quality_context.threshold if a.quality_context.threshold is not none else '—' }})
+                    </p>
+                  {% endif %}
+                  {% if a.evidence and a.evidence.items is defined %}
+                    <details style="margin-top:8px;">
+                      <summary class="small" style="cursor:pointer; color:var(--muted);">Show evidence (stored)</summary>
+                      <table style="width:100%; border-collapse:collapse; margin-top:6px;">
+                        <thead>
+                          <tr>
+                            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Field</th>
+                            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Value</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% for k, v in a.evidence.items() %}
+                            <tr>
+                              <td style="padding:6px 0;">{{ k }}</td>
+                              <td style="padding:6px 0;">{{ v }}</td>
+                            </tr>
+                          {% endfor %}
+                        </tbody>
+                      </table>
+                    </details>
+                  {% endif %}
+                  <p class="small">Status: <strong>{{ a.status if a.status is not none else 'review' }}</strong> • Updated: {{ a.updated_at|humandt }}</p>
+                </div>
+                <div class="right">
+                  <a class="btn btn-sm" href="/alerts/{{ aid }}">Manage</a>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div style="height:14px;"></div>
+
+    <div class="card">
+      <div class="card-b">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <h2>All active alerts</h2>
+            <p class="sub" style="margin-top:6px;">Filter and open any alert for details, notes, and audit trail.</p>
+          </div>
+        </div>
+        <div class="hr"></div>
+
+        {% if all_active|length == 0 %}
+          <div class="empty">
+            <div class="empty-title">No active alerts</div>
+            <div class="empty-sub">
+              The latest data was processed and there are no active alerts right now.
+              Upload a new CSV any time to re-check signals.
+            </div>
+            <a class="btn" href="/upload">Upload new data</a>
+            {% if latest_run %}
+              <a class="btn primary" style="margin-left:8px;" href="/run/{{ latest_run.id }}">View this run dashboard</a>
+            {% endif %}
+          </div>
+        {% else %}
+          <div class="grid">
+            {% for a in all_active %}
+              {% set aid = a.alert_id if a.alert_id is defined and a.alert_id else a.id %}
+              <div class="alert" id="{{ aid }}">
+                <div class="badge {{ 'crit' if a.severity=='critical' else ('warn' if a.severity=='warning' else 'info') }}">{{ a.severity|upper }}</div>
+                <div class="meta">
+                  <p class="title">{{ a.title }}</p>
+                  {% if a.why %}<p class="why">{{ a.why }}</p>{% endif %}
+                  {% if a.suppressed %}
+                    <p class="small" style="color:var(--muted);">Suppressed: {{ a.suppression_reason }}</p>
+                  {% endif %}
+                  {% if a.quality_context %}
+                    <p class="small" style="color:var(--muted);">
+                      Data quality: {{ '%.0f'|format(a.quality_context.score if a.quality_context.score is not none else 0) }}/100
+                      (threshold {{ a.quality_context.threshold if a.quality_context.threshold is not none else '—' }})
+                    </p>
+                  {% endif %}
+                  {% if a.evidence and a.evidence.items is defined %}
+                    <details style="margin-top:8px;">
+                      <summary class="small" style="cursor:pointer; color:var(--muted);">Show evidence</summary>
+                      <table style="width:100%; border-collapse:collapse; margin-top:6px;">
+                        <thead>
+                          <tr>
+                            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Field</th>
+                            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Value</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% for k, v in a.evidence.items() %}
+                            <tr>
+                              <td style="padding:6px 0;">{{ k }}</td>
+                              <td style="padding:6px 0;">{{ v }}</td>
+                            </tr>
+                          {% endfor %}
+                        </tbody>
+                      </table>
+                    </details>
+                  {% endif %}
+                  <p class="small">Status: <strong>{{ a.status }}</strong> • Updated: {{ a.updated_at|humandt }}</p>
+                </div>
+                <div class="right">
+                  <a class="btn btn-sm" href="/alerts/{{ aid }}">→</a>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+
+        {% if quieted_resolved|length > 0 %}
+          <div class="hr"></div>
+          <details>
+            <summary style="cursor:pointer; font-weight:900;">Show quieted / resolved ({{ quieted_resolved|length }})</summary>
+            <div style="margin-top:12px;" class="grid">
+              {% for a in quieted_resolved %}
+                {% set aid = a.alert_id if a.alert_id is defined and a.alert_id else a.id %}
+                <div class="alert">
+                  <div class="badge">{{ a.status|upper }}</div>
+                  <div class="meta">
+                    <p class="title">{{ a.title }}</p>
+                    <p class="small">Updated: {{ a.updated_at|humandt }}</p>
+                  </div>
+                  <div class="right"><a class="btn btn-sm" href="/alerts/{{ aid }}">→</a></div>
+                </div>
+              {% endfor %}
+            </div>
+          </details>
+        {% endif %}
+      </div>
+    </div>
+
+  {% endif %}
+{% endblock %}
