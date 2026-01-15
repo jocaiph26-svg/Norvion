@@ -1028,6 +1028,14 @@ def _access_role(request: Optional[Request]) -> str:
         raw = str(request.headers.get(ACCESS_ROLE_HEADER) or "").strip().lower()
     except Exception:
         raw = ""
+    # Dev bypass: localhost requests default to admin
+    if not raw or raw not in ACCESS_ROLES:
+        try:
+            client_host = str(request.client.host if request.client else "")
+            if client_host in ("127.0.0.1", "::1", "localhost"):
+                return "admin"
+        except Exception:
+            pass
     return raw if raw in ACCESS_ROLES else "viewer"
 
 
@@ -2381,7 +2389,7 @@ def build_summary_and_alerts(
                 return {}
             days = d["days_past_due"]
             return {
-                "7_30_days": int((days >= 7) & (days < 30).sum()),
+                "7_30_days": int(((days >= 7) & (days < 30)).sum()),
                 "30_60_days": int(((days >= 30) & (days < 60)).sum()),
                 "60_90_days": int(((days >= 60) & (days < 90)).sum()),
                 "90_plus_days": int((days >= 90).sum()),
