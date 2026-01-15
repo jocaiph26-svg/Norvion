@@ -3685,6 +3685,39 @@ async def analyze(request: Request, file: UploadFile = File(...)):
             )
 
         df, normalization = normalise_csv(raw_df, return_report=True)
+
+        # P0-01: Defensive polarity validation (prevent silent inversion)
+        if "type" in df.columns and "amount" in df.columns:
+            income_rows = df[df["type"] == "income"]
+            expense_rows = df[df["type"] == "expense"]
+            income_negative_count = (income_rows["amount"] < 0).sum() if len(income_rows) > 0 else 0
+            expense_positive_count = (expense_rows["amount"] > 0).sum() if len(expense_rows) > 0 else 0
+            income_inverted = len(income_rows) > 0 and income_negative_count > len(income_rows) * 0.5
+            expense_inverted = len(expense_rows) > 0 and expense_positive_count > len(expense_rows) * 0.5
+            if income_inverted or expense_inverted:
+                return _render_or_fallback(
+                    request,
+                    "error.html",
+                    {
+                        "request": request,
+                        "title": "Upload failed",
+                        "error_title": "CSV validation failed",
+                        "error_message": "Amount polarity appears inverted. Income transactions should be positive, expenses should be negative.",
+                        "schema_help": {
+                            "missing_required": [],
+                            "expected_headers": ["date", "amount", "type", "category", "counterparty", "description"],
+                            "example_header_row": "date,amount,type,category,counterparty,description",
+                            "note": "Ensure amounts follow standard accounting conventions: positive for income, negative for expenses.",
+                        },
+                        "actions": [
+                            {"label": "Back to Upload", "href": "/upload"},
+                            {"label": "Home", "href": "/dashboard"},
+                        ],
+                    },
+                    fallback_title="CSV validation failed",
+                    fallback_html="<p>Amount polarity appears inverted. Income transactions should be positive, expenses should be negative.</p>",
+                )
+
         contract = _ledger_contract_report(df)
         run_created_at = datetime.utcnow().isoformat()
         # Categorisation (deterministic, DB-backed)
@@ -3973,6 +4006,9 @@ def alerts_control_panel(request: Request, run_id: Optional[int] = Query(None)):
         reverse=True,
     )
 
+    summary = latest_run.get("summary", {}) if latest_run else {}
+    quality = latest_run.get("quality", {}) if latest_run else {}
+
     return _render_or_fallback(
         request,
         "alerts.html",
@@ -3987,6 +4023,8 @@ def alerts_control_panel(request: Request, run_id: Optional[int] = Query(None)):
             "latest_run_id": (latest_run_actual.get("id") if latest_run_actual else None),
             "run_qs": _run_qs(latest_run, latest_run_actual),
             "run_scope": run_scope,
+            "summary": summary,
+            "quality": quality,
         },
         fallback_title="Alerts",
         fallback_html="<p>Alerts template missing. Use <code>/api/alerts/state</code> for JSON.</p>",

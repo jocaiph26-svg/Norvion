@@ -39,13 +39,13 @@
 
     <div class="grid cols-4">
     <div class="card kpi">
-      <div class="label">Current cash</div>
+      <div class="label">Modeled cash position</div>
       <div class="value">
         {% if s.current_cash is not none %}
           {{ s.current_cash|money(s.currency) }}
         {% endif %}
       </div>
-      <div class="hint">{% if s.current_cash is not none %}Stored for this run.{% endif %}</div>
+      <div class="hint">{% if s.current_cash is not none %}Computed from starting cash + cumulative net change.{% endif %}</div>
     </div>
 
       <div class="card kpi">

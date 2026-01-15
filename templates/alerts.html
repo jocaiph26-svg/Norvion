@@ -52,7 +52,10 @@
           <div class="empty">
             <div class="empty-title">No active alerts</div>
             <div class="empty-sub">
-              No active alerts are recorded for this run. Create another run to continue monitoring.
+              No active alerts are recorded for this run.
+              {% if summary.alert_quality_gate and summary.alert_quality_gate.suppressed %}
+                Alert checks were not evaluated due to data quality score below threshold.
+              {% endif %}
             </div>
             {% if latest_run %}
               <a class="btn primary" style="margin-left:8px;" href="/run/{{ latest_run.id }}{{ run_qs if run_qs is defined else '' }}">View run detail</a>

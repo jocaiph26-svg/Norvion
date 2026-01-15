@@ -1,0 +1,110 @@
+date,amount,type,category,counterparty,description,invoice_id,due_date,status,direction
+2024-10-01,8500.00,income,Revenue,Client A,Monthly retainer payment,INV-1001,2024-09-25,paid,AR
+2024-10-01,-450.00,expense,Office,Office Supplies Co,Office supplies,,,,
+2024-10-02,-380.00,expense,Software,SaaS Provider,Monthly software subscription,,,,
+2024-10-03,7200.00,income,Revenue,Client B,Project milestone payment,INV-1002,2024-09-28,paid,AR
+2024-10-03,-520.00,expense,Marketing,Ad Platform,Google Ads campaign,,,,
+2024-10-04,-290.00,expense,Utilities,Power Company,Electricity bill,,,,
+2024-10-05,6800.00,income,Revenue,Client C,Consulting services,INV-1003,2024-10-01,paid,AR
+2024-10-05,-410.00,expense,Office,Office Supplies Co,Printer supplies,,,,
+2024-10-06,-350.00,expense,Software,Cloud Services,AWS hosting,,,,
+2024-10-07,5500.00,income,Revenue,Client D,Design services,INV-1004,2024-10-05,paid,AR
+2024-10-08,-480.00,expense,Professional,Accountant,Bookkeeping services,,,,
+2024-10-09,-320.00,expense,Office,Office Supplies Co,Stationery order,,,,
+2024-10-10,7800.00,income,Revenue,Client A,Additional project work,INV-1005,2024-10-08,paid,AR
+2024-10-11,-390.00,expense,Marketing,Social Media Ads,Facebook ads,,,,
+2024-10-12,-440.00,expense,Software,SaaS Provider,Additional user licenses,,,,
+2024-10-13,6200.00,income,Revenue,Client B,Monthly retainer,INV-1006,2024-10-10,paid,AR
+2024-10-14,-510.00,expense,Office,Office Supplies Co,Desk supplies,,,,
+2024-10-15,-370.00,expense,Utilities,Internet Provider,Internet service,,,,
+2024-10-16,5900.00,income,Revenue,Client E,Web development,INV-1007,2024-10-12,paid,AR
+2024-10-17,-420.00,expense,Professional,Insurance Co,Business insurance,,,,
+2024-10-18,-380.00,expense,Office,Office Supplies Co,Coffee and snacks,,,,
+2024-10-19,7100.00,income,Revenue,Client C,Strategy consulting,INV-1008,2024-10-15,paid,AR
+2024-10-20,-460.00,expense,Marketing,Email Marketing,Campaign costs,,,,
+2024-10-21,-340.00,expense,Software,Project Tools,Project management software,,,,
+2024-10-22,6400.00,income,Revenue,Client A,Maintenance contract,INV-1009,2024-10-18,paid,AR
+2024-10-23,-490.00,expense,Office,Office Supplies Co,Bulk order supplies,,,,
+2024-10-24,-410.00,expense,Professional,Legal Services,Contract review,,,,
+2024-10-25,5800.00,income,Revenue,Client B,Additional services,INV-1010,2024-10-20,paid,AR
+2024-10-26,-380.00,expense,Utilities,Phone Company,Mobile phones,,,,
+2024-10-27,-450.00,expense,Office,Office Supplies Co,Equipment maintenance,,,,
+2024-10-28,6900.00,income,Revenue,Client F,New project kickoff,INV-1011,2024-10-25,paid,AR
+2024-10-29,-520.00,expense,Software,Development Tools,IDE licenses,,,,
+2024-10-30,-360.00,expense,Marketing,Content Creation,Blog writing service,,,,
+2024-10-31,7300.00,income,Revenue,Client A,October completion bonus,INV-1012,2024-10-28,paid,AR
+2024-11-01,-430.00,expense,Office,Office Supplies Co,Monthly supplies order,,,,
+2024-11-02,-470.00,expense,Professional,Training Provider,Staff training course,,,,
+2024-11-03,6100.00,income,Revenue,Client C,Ongoing support,INV-1013,2024-11-01,paid,AR
+2024-11-04,-390.00,expense,Software,Security Tools,Antivirus software,,,,
+2024-11-05,-440.00,expense,Office,Office Supplies Co,Cleaning supplies,,,,
+2024-11-06,5700.00,income,Revenue,Client D,Monthly services,INV-1014,2024-11-03,paid,AR
+2024-11-07,-510.00,expense,Marketing,SEO Services,SEO optimization,,,,
+2024-11-08,-370.00,expense,Utilities,Water Company,Water bill,,,,
+2024-11-09,6500.00,income,Revenue,Client E,Feature development,INV-1015,2024-11-06,paid,AR
+2024-11-10,-420.00,expense,Professional,Consultant,Business consultant,,,,
+2024-11-11,-460.00,expense,Office,Office Supplies Co,Office furniture repair,,,,
+2024-11-12,7000.00,income,Revenue,Client A,New contract start,INV-1016,2024-11-09,paid,AR
+2024-11-13,-380.00,expense,Software,Backup Services,Cloud backup,,,,
+2024-11-14,-490.00,expense,Marketing,Trade Show,Conference booth,,,,
+2024-11-15,5600.00,income,Revenue,Client B,Support services,INV-1017,2024-11-12,paid,AR
+2024-11-16,-410.00,expense,Office,Office Supplies Co,Paper and ink,,,,
+2024-11-17,-350.00,expense,Professional,HR Services,Recruitment fees,,,,
+2024-11-18,6300.00,income,Revenue,Client G,New client project,INV-1018,2024-11-15,paid,AR
+2024-11-19,-470.00,expense,Utilities,Gas Company,Heating bill,,,,
+2024-11-20,-390.00,expense,Office,Office Supplies Co,Kitchen supplies,,,,
+2024-11-21,5900.00,income,Revenue,Client C,Ad hoc work,INV-1019,2024-11-18,paid,AR
+2024-11-22,-440.00,expense,Software,Collaboration Tools,Slack premium,,,,
+2024-11-23,-510.00,expense,Marketing,Advertising,Print ads,,,,
+2024-11-24,6700.00,income,Revenue,Client A,Bonus payment,INV-1020,2024-11-21,paid,AR
+2024-11-25,-370.00,expense,Professional,Banking Fees,Account fees,,,,
+2024-11-26,-430.00,expense,Office,Office Supplies Co,Equipment upgrade,,,,
+2024-11-27,7200.00,income,Revenue,Client D,Year-end project,INV-1021,2024-11-24,paid,AR
+2024-11-28,-460.00,expense,Software,Design Tools,Adobe Creative Cloud,,,,
+2024-11-29,-400.00,expense,Marketing,Influencer,Social media campaign,,,,
+2024-11-30,5400.00,income,Revenue,Client E,November completion,INV-1022,2024-11-27,paid,AR
+2024-12-01,-1200.00,expense,Office,Major Vendor XYZ,Bulk office renovation supplies,,,,
+2024-12-02,-1350.00,expense,Office,Major Vendor XYZ,Additional renovation materials,,,,
+2024-12-03,2800.00,income,Revenue,Client A,Reduced scope project,INV-1023,2024-12-01,open,AR
+2024-12-03,-1280.00,expense,Office,Major Vendor XYZ,Renovation labor costs,,,,
+2024-12-04,-1420.00,expense,Office,Major Vendor XYZ,Renovation finishing touches,,,,
+2024-12-05,2600.00,income,Revenue,Client B,Small maintenance task,INV-1024,2024-12-03,open,AR
+2024-12-05,-1150.00,expense,Office,Major Vendor XYZ,Office furniture order,,,,
+2024-12-06,-1380.00,expense,Office,Major Vendor XYZ,Tech equipment bulk order,,,,
+2024-12-07,2400.00,income,Revenue,Client C,Consulting hours,INV-1025,2024-11-28,open,AR
+2024-12-07,-1290.00,expense,Office,Major Vendor XYZ,Network infrastructure,,,,
+2024-12-08,-1160.00,expense,Office,Major Vendor XYZ,Security system install,,,,
+2024-12-09,2200.00,income,Revenue,Client H,Small new project,INV-1026,2024-11-30,open,AR
+2024-12-09,-1340.00,expense,Office,Major Vendor XYZ,HVAC system upgrade,,,,
+2024-12-10,-8500.00,expense,Equipment,Equipment Supplier,Large machinery purchase,INV-2001,2024-12-20,open,AP
+2024-12-11,2100.00,income,Revenue,Client D,Partial payment,INV-1027,2024-12-02,open,AR
+2024-12-11,-1220.00,expense,Office,Major Vendor XYZ,Final renovation payment,,,,
+2024-12-12,-1370.00,expense,Office,Major Vendor XYZ,Maintenance contract setup,,,,
+2024-12-13,1900.00,income,Revenue,Client E,Reduced contract,INV-1028,2024-12-05,open,AR
+2024-12-13,-1190.00,expense,Office,Major Vendor XYZ,Cleaning service contract,,,,
+2024-12-14,-1450.00,expense,Office,Major Vendor XYZ,Storage solutions,,,,
+2024-12-15,1800.00,income,Revenue,Client A,Emergency support,INV-1029,2024-12-07,unpaid,AR
+2024-12-15,-1280.00,expense,Office,Major Vendor XYZ,Signage installation,,,,
+2024-12-16,-1320.00,expense,Office,Major Vendor XYZ,Break room setup,,,,
+2024-12-17,2300.00,income,Revenue,Client B,Quick turnaround task,INV-1030,2024-12-10,unpaid,AR
+2024-12-17,-1240.00,expense,Office,Major Vendor XYZ,Conference room equipment,,,,
+2024-12-18,-1410.00,expense,Office,Major Vendor XYZ,Parking lot improvements,,,,
+2024-12-19,2000.00,income,Revenue,Client C,Consulting call,INV-1031,2024-11-25,overdue,AR
+2024-12-19,-1270.00,expense,Office,Major Vendor XYZ,Landscaping services,,,,
+2024-12-20,-1350.00,expense,Office,Major Vendor XYZ,Window treatments,,,,
+2024-12-21,1700.00,income,Revenue,Client F,Reduced services,INV-1032,2024-11-20,overdue,AR
+2024-12-21,-1180.00,expense,Office,Major Vendor XYZ,Lighting upgrades,,,,
+2024-12-22,-2500.00,expense,Professional,Legal Services,Contract dispute legal fees,INV-2002,2024-11-30,outstanding,AP
+2024-12-22,-1390.00,expense,Office,Major Vendor XYZ,Flooring replacement,,,,
+2024-12-23,1600.00,income,Revenue,Client D,Minimal hours,INV-1033,2024-11-18,overdue,AR
+2024-12-23,-1210.00,expense,Office,Major Vendor XYZ,Paint and decor,,,,
+2024-12-24,-1340.00,expense,Office,Major Vendor XYZ,Emergency repairs,,,,
+2024-12-26,1500.00,income,Revenue,Client G,Small update,INV-1034,2024-12-15,open,AR
+2024-12-26,-1260.00,expense,Office,Major Vendor XYZ,Year-end supplies,,,,
+2024-12-27,-1420.00,expense,Office,Major Vendor XYZ,Equipment calibration,,,,
+2024-12-28,1400.00,income,Revenue,Client A,Final December work,INV-1035,2024-12-20,open,AR
+2024-12-28,-1170.00,expense,Office,Major Vendor XYZ,Inventory management system,,,,
+2024-12-29,-1380.00,expense,Office,Major Vendor XYZ,Access control system,,,,
+2024-12-30,1300.00,income,Revenue,Client B,Last minute request,INV-1036,2024-12-22,open,AR
+2024-12-30,-1290.00,expense,Office,Major Vendor XYZ,Fire safety equipment,,,,
+2024-12-31,-1450.00,expense,Office,Major Vendor XYZ,Year-end maintenance,,,,
