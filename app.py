@@ -1028,14 +1028,16 @@ def _access_role(request: Optional[Request]) -> str:
         raw = str(request.headers.get(ACCESS_ROLE_HEADER) or "").strip().lower()
     except Exception:
         raw = ""
-    # Dev bypass: localhost requests default to admin
+    # Dev bypass: localhost requests default to admin ONLY if SME_EW_DEV_BYPASS=true
     if not raw or raw not in ACCESS_ROLES:
-        try:
-            client_host = str(request.client.host if request.client else "")
-            if client_host in ("127.0.0.1", "::1", "localhost"):
-                return "admin"
-        except Exception:
-            pass
+        dev_bypass_enabled = _parse_bool(os.getenv("SME_EW_DEV_BYPASS", "false"), default=False)
+        if dev_bypass_enabled:
+            try:
+                client_host = str(request.client.host if request.client else "")
+                if client_host in ("127.0.0.1", "::1", "localhost"):
+                    return "admin"
+            except Exception:
+                pass
     return raw if raw in ACCESS_ROLES else "viewer"
 
 
