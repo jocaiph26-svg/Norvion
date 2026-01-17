@@ -201,7 +201,13 @@ app = FastAPI(title=APP_TITLE)
 # Session middleware is used only to persist selected run context across pages.
 # This uses Starlette's built-in session support (no new dependencies).
 _SESSION_SECRET = os.getenv('SME_EW_SESSION_SECRET', 'CHANGE_ME_DEMO_SESSION_SECRET')
+_SME_EW_ENV = os.getenv('SME_EW_ENV', 'development').strip().lower()
 if _SESSION_SECRET == "CHANGE_ME_DEMO_SESSION_SECRET":
+    if _SME_EW_ENV == "production":
+        raise RuntimeError(
+            "FATAL: SME_EW_SESSION_SECRET must be set in production mode. "
+            "Refusing to start with demo default secret."
+        )
     logger.warning(
         "SME_EW_SESSION_SECRET is using the demo default. Set an env var for safer sessions."
     )
