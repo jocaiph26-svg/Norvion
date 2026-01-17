@@ -818,8 +818,8 @@
 
   <div class="card">
     <div class="card-b">
-      <h2>Why checks did not trigger</h2>
-      <p class="sub" style="margin-top:6px;">Per-rule non-trigger reasons for this run.</p>
+      <h2>Checks not evaluated (run-time snapshot)</h2>
+      <p class="sub" style="margin-top:6px;">Per-rule reasons why checks were not run or did not fire, recorded at analysis time.</p>
       <div class="hr"></div>
       {% if summary.non_trigger_explainability and summary.non_trigger_explainability|length > 0 %}
         <table class="table">
@@ -849,7 +849,7 @@
           </tbody>
         </table>
       {% else %}
-        <div class="small" style="color:var(--muted);">No non-trigger explanations are available for this run.</div>
+        <div class="small" style="color:var(--muted);">No non-trigger data recorded for this run (field may not have been populated).</div>
       {% endif %}
     </div>
   </div>
