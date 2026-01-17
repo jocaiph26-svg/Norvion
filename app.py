@@ -80,6 +80,9 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
+# TIMESTAMP POLICY: All timestamps use UTC (datetime.utcnow()).
+# Stored timestamps are ISO 8601 strings without timezone suffix.
+# Consumers should treat all timestamps as UTC.
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple, Optional, Union
 from pathlib import Path
@@ -3677,7 +3680,7 @@ async def analyze(request: Request, file: UploadFile = File(...)):
                 "request": request,
                 "title": "Upload failed",
                 "error_title": "Upload failed",
-                "error_message": f"That file is too large for this demo (max {MAX_UPLOAD_BYTES} bytes).",
+                "error_message": f"That file is too large for this environment (max {MAX_UPLOAD_BYTES} bytes).",
                 "schema_help": None,
                 "actions": [
                     {"label": "Back to Upload", "href": "/upload"},
@@ -3686,7 +3689,7 @@ async def analyze(request: Request, file: UploadFile = File(...)):
                 ],
             },
             fallback_title="Upload failed",
-            fallback_html=f"<p>That file is too large for this demo (max {MAX_UPLOAD_BYTES} bytes).</p>",
+            fallback_html=f"<p>That file is too large for this environment (max {MAX_UPLOAD_BYTES} bytes).</p>",
         )
 
     s = read_settings(tenant_id)
@@ -3733,7 +3736,7 @@ async def analyze(request: Request, file: UploadFile = File(...)):
                     "request": request,
                     "title": "Upload failed",
                     "error_title": "Upload failed",
-                    "error_message": f"That CSV has too many rows for this demo (max {MAX_UPLOAD_ROWS:,}). Please export a smaller date range and try again.",
+                    "error_message": f"That CSV has too many rows for this environment (max {MAX_UPLOAD_ROWS:,}). Please export a smaller date range and try again.",
                     "schema_help": {
                         "missing_required": [],
                         "expected_headers": ["date", "amount", "type", "category", "counterparty", "description"],
@@ -3747,7 +3750,7 @@ async def analyze(request: Request, file: UploadFile = File(...)):
                     ],
                 },
                 fallback_title="Upload failed",
-                fallback_html=f"<p>That CSV has too many rows for this demo (max {MAX_UPLOAD_ROWS:,}).</p>",
+                fallback_html=f"<p>That CSV has too many rows for this environment (max {MAX_UPLOAD_ROWS:,}).</p>",
             )
 
         df, normalization = normalise_csv(raw_df, return_report=True)
@@ -5496,7 +5499,7 @@ def api_ingest_local(request: Request, path: str = Form(...), provider: str = Fo
 
     content = full.read_bytes()
     if len(content) > MAX_UPLOAD_BYTES:
-        return JSONResponse({"error": "file too large for demo"}, status_code=413)
+        return JSONResponse({"error": "file too large for this environment"}, status_code=413)
 
     settings_hash = _hash_settings(s)
     file_sha = hashlib.sha256(content).hexdigest()
@@ -6178,7 +6181,12 @@ async def api_webhook_transactions(request: Request):
 
     body = await request.json()
     secret = str(body.get("secret") or "")
-    if secret != _effective_webhook_secret(s):
+    effective_secret = _effective_webhook_secret(s)
+    # Production enforcement: reject requests if webhook_secret is demo default
+    if _SME_EW_ENV == "production" and effective_secret == "CHANGE_ME_DEMO_SECRET":
+        logger.error("Webhook rejected: webhook_secret is demo default in production mode")
+        return JSONResponse({"error": "webhook_secret not configured for production"}, status_code=503)
+    if secret != effective_secret:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     provider = str(body.get("provider") or "unknown")
@@ -6188,7 +6196,7 @@ async def api_webhook_transactions(request: Request):
         return JSONResponse({"error": "missing transactions[]"}, status_code=400)
     if len(tx) > MAX_UPLOAD_ROWS:
         return JSONResponse(
-            {"error": f"too many transactions for demo (max {MAX_UPLOAD_ROWS:,})"},
+            {"error": f"too many transactions for this environment (max {MAX_UPLOAD_ROWS:,})"},
             status_code=400,
         )
     request_hash = ""
