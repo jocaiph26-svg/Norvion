@@ -2133,7 +2133,7 @@ def quality_band(score: float) -> str:
     return "D"
 
 # ----------------------------
-# Data quality
+# Data completeness
 # ----------------------------
 def data_quality(df: pd.DataFrame, window_df: pd.DataFrame) -> Dict[str, Any]:
     total = len(df)
@@ -2634,7 +2634,7 @@ def build_summary_and_alerts(
     suggested_actions=[],
     review_considerations=[
         "Whether this is one-off or recurring expense",
-        "Data quality: potential duplicate or export error",
+        "Data completeness: potential duplicate or export error",
         "Known seasonal/annual obligations (insurance, licenses, equipment)",
     ],
     api_considerations={
@@ -2798,7 +2798,7 @@ def build_summary_and_alerts(
         }
         if quality_score < QUALITY_SUPPRESSION_THRESHOLD:
             a.suppressed = True
-            a.suppression_reason = "Data quality below threshold"
+            a.suppression_reason = "Data completeness below threshold"
         else:
             a.suppressed = False
             a.suppression_reason = ""
@@ -2833,7 +2833,7 @@ def build_summary_and_alerts(
                 missing_gates=missing_gates_map.get(rid, []),
                 threshold_crossed=bool(threshold_crossed_map.get(rid, False)),
                 suppressed=bool(gate.get("suppressed")),
-                suppression_reason="Data quality below threshold" if gate.get("suppressed") else "",
+                suppression_reason="Data completeness below threshold" if gate.get("suppressed") else "",
             )
         )
     summary["alert_quality_gate"] = gate
@@ -3351,7 +3351,7 @@ def _insight_narratives(
         out.append(
             {
                 "title": "Runway",
-                "text": f"Estimated runway is {float(runway_days):.0f} days based on average daily burn of {money(avg_daily_burn, currency)} over {burn_days} days.",
+                "text": f"Modeled runway (static burn) is {float(runway_days):.0f} days based on average daily burn of {money(avg_daily_burn, currency)} over {burn_days} days.",
                 "evidence": {
                     "runway_days": float(runway_days or 0.0),
                     "avg_daily_burn": avg_daily_burn,
@@ -3399,7 +3399,7 @@ def _insight_narratives(
     out.append(
         {
             "title": "Alert summary",
-            "text": f"{len(alerts)} alert(s) in this run; {suppressed_count} suppressed due to data quality.",
+            "text": f"{len(alerts)} alert(s) in this run; {suppressed_count} suppressed due to data completeness.",
             "evidence": {"alerts_count": int(len(alerts)), "suppressed_count": int(suppressed_count)},
         }
     )
@@ -3407,8 +3407,8 @@ def _insight_narratives(
     if isinstance(quality, dict):
         out.append(
             {
-                "title": "Data quality",
-                "text": f"Data quality score is {float(quality.get('score') or 0.0):.0f}/100 ({quality.get('band') or '—'}).",
+                "title": "Data completeness",
+                "text": f"Data completeness score is {float(quality.get('score') or 0.0):.0f}/100 ({quality.get('band') or '—'}).",
                 "evidence": {
                     "score": float(quality.get("score") or 0.0),
                     "band": str(quality.get("band") or ""),

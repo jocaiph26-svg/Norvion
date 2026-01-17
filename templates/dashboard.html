@@ -748,7 +748,7 @@
                   <div class="field">
                     <label>Status</label>
                     <select name="status" {% if not can_update %}disabled{% endif %}>
-                      {% for opt in ['review','expected','actioned','ignore','snoozed'] %}
+                      {% for opt in ['review','noted','actioned','ignore','snoozed'] %}
                         <option value="{{ opt }}" {{ 'selected' if a._status==opt else '' }}>{{ opt|capitalize }}</option>
                       {% endfor %}
                     </select>

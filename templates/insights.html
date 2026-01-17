@@ -256,7 +256,7 @@
           {% if s.alert_quality_gate %}
             <div class="row" style="margin-top:8px;">
               {% if s.alert_quality_gate.threshold is not none %}
-                <div class="pill dim">Quality threshold: {{ s.alert_quality_gate.threshold }}</div>
+                <div class="pill dim">Completeness threshold: {{ s.alert_quality_gate.threshold }}</div>
               {% endif %}
               <div class="pill dim">Suppressed: {{ "true" if s.alert_quality_gate.suppressed else "false" }}</div>
             </div>

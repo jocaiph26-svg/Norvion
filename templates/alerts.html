@@ -54,7 +54,7 @@
             <div class="empty-sub">
               No active alerts are recorded for this run.
               {% if summary.alert_quality_gate and summary.alert_quality_gate.suppressed %}
-                Alert checks were not evaluated due to data quality score below threshold.
+                Alert checks were not evaluated due to data completeness score below threshold.
               {% endif %}
             </div>
             {% if latest_run %}
