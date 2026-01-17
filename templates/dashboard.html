@@ -976,12 +976,7 @@
             {% endif %}
           </div>
           <div class="row" style="margin-top:8px;">
-            {% if params.rule_inventory_hash %}
-              <div class="pill dim">Rule inventory hash (stored): {{ params.rule_inventory_hash }}</div>
-            {% endif %}
-            {% if params.rule_inventory_version %}
-              <div class="pill dim">Rule inventory version (stored): {{ params.rule_inventory_version }}</div>
-            {% endif %}
+            <div class="pill dim">Rule inventory hash (run-time snapshot): {{ params.rule_inventory_hash if params.rule_inventory_hash else 'Not recorded' }}</div>
           </div>
           <div class="row" style="margin-top:8px;">
             {% if params.artifact_ids is defined and params.artifact_ids.report_id %}
@@ -1155,9 +1150,7 @@
             {% if params.code_hash %}
               <div class="pill dim">Code hash: {{ params.code_hash }}</div>
             {% endif %}
-            {% if params.rule_inventory_hash %}
-              <div class="pill dim">Rule inventory hash: {{ params.rule_inventory_hash }}</div>
-            {% endif %}
+            <div class="pill dim">Rule inventory hash (run-time snapshot): {{ params.rule_inventory_hash if params.rule_inventory_hash else 'Not recorded' }}</div>
           </div>
           {% if params.source is defined and params.source.ingest_id %}
             <div class="small" style="margin-top:8px; color:#334155;">
