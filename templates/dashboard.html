@@ -443,7 +443,7 @@
           {% endif %}
           {% if quality.score is not none or quality.band %}
             <tr>
-              <td style="padding:6px 0; font-weight:800;">Data quality</td>
+              <td style="padding:6px 0; font-weight:800;">Data completeness</td>
               <td style="padding:6px 0;">
                 {% if quality.score is not none %}
                   <div><span class="mono">quality.score</span> {{ '%.0f'|format(quality.score) }}</div>
@@ -775,7 +775,7 @@
                     {% endif %}
                     {% if a.quality_context and a.quality_context.score is not none %}
                       <div class="pill dim">
-                        Data quality (stored): {{ '%.0f'|format(a.quality_context.score) }}/100
+                        Data completeness (stored): {{ '%.0f'|format(a.quality_context.score) }}/100
                         {% if a.quality_context.threshold is not none %}
                           (threshold {{ a.quality_context.threshold }})
                         {% endif %}
@@ -858,7 +858,7 @@
 
   <div class="card">
     <div class="card-b">
-      <h2>Data quality (stored)</h2>
+      <h2>Data completeness (stored)</h2>
       <div class="small" style="color:var(--muted); margin-top:4px;">
         Stored score, band, and coverage fields for this run.
       </div>
@@ -1097,7 +1097,7 @@
               </td>
             </tr>
             <tr>
-              <td style="padding:6px 0; font-weight:800;">Data quality</td>
+              <td style="padding:6px 0; font-weight:800;">Data completeness</td>
               <td style="padding:6px 0;">
                 <span class="mono">quality.score</span>,
                 <span class="mono">quality.band</span>,

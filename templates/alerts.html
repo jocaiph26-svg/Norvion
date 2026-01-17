@@ -85,7 +85,7 @@
                 {% if a.quality_context %}
                   <div class="small" style="color:var(--muted); margin-top:6px;">
                     {% if a.quality_context.score is not none %}
-                      Data quality (stored): {{ '%.0f'|format(a.quality_context.score) }}/100
+                      Data completeness (stored): {{ '%.0f'|format(a.quality_context.score) }}/100
                       {% if a.quality_context.threshold is not none %}
                         (threshold {{ a.quality_context.threshold }})
                       {% endif %}
