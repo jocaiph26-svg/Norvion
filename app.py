@@ -929,12 +929,18 @@ def _effective_webhook_secret(settings: Dict[str, Any]) -> str:
 
 
 # ----------------------------
-# V9 AI explanation scaffolding (no output)
+# DISABLED: AI explanation scaffolding
+# ----------------------------
+# WARNING: AI features are DISABLED and MUST NOT be enabled without enterprise
+# policy approval. The system is deterministic and non-advisory by design.
+# These schemas exist for future reference ONLY. No AI inference occurs.
+# Kill switch defaults to OFF. Do not change without governance review.
 # ----------------------------
 AI_EXPLANATION_SCHEMA_VERSION = "v1"
-AI_EXPLANATION_KILL_SWITCH_KEY = "ai_explanations_enabled"
+AI_EXPLANATION_KILL_SWITCH_KEY = "ai_explanations_enabled"  # Default: OFF
 AI_PROMPT_TEMPLATE_ID = "explain_v1"
 
+# DISABLED: Schema reserved for future AI features (not currently used)
 AI_EXPLANATION_SCHEMA = {
     "request": {
         "schema_version": AI_EXPLANATION_SCHEMA_VERSION,
@@ -963,6 +969,7 @@ AI_EXPLANATION_SCHEMA = {
     },
 }
 
+# DISABLED: Governance constraints for future AI (not currently enforced)
 AI_PROMPT_GOVERNANCE = {
     "constraints": [
         "no advice",
@@ -975,6 +982,7 @@ AI_PROMPT_GOVERNANCE = {
     "allowed_evidence_roots": ["summary", "alerts", "quality", "params", "run"],
 }
 
+# DISABLED: Audit log schema for future AI (not currently used)
 AI_AUDIT_LOG_SCHEMA = {
     "schema_version": AI_EXPLANATION_SCHEMA_VERSION,
     "fields": [
@@ -1942,13 +1950,17 @@ class Alert:
     title: str
     why: str
 
-    # Deprecated: retained for backward compatibility only
+    # INTERNAL-ONLY: Deprecated field retained for backward compatibility.
+    # NOT advisory. NOT recommendations. Empty in all new alerts.
     suggested_actions: List[str]
 
-    # Canonical human-facing, non-advisory review material
+    # INTERNAL-ONLY: Observational context for human review.
+    # NOT recommendations. NOT advice. Descriptive only.
+    # API consumers MUST NOT interpret these as guidance or suggestions.
     review_considerations: List[str]
 
-    # Reserved for future structured / API-driven review context
+    # INTERNAL-ONLY: Reserved schema field for future structured context.
+    # NOT advisory. NOT recommendations. Currently unused metadata.
     api_considerations: Dict[str, Any]
 
     signal_strength: str
@@ -4738,9 +4750,15 @@ def api_export_bundle(request: Request, run_id: int):
 
 
 # ----------------------------
-# NEW: Strategies + SWOT/Opportunities (fixes the "strategies tab" crash)
+# DISABLED: Advisory strategies function
 # ----------------------------
-def _rule_based_strategies(latest_run: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+# WARNING: This function contains advisory/recommendation content that violates
+# the non-advisory enterprise posture. It is DISABLED and MUST NOT be exposed.
+# The /strategies route passes strategies=[] to prevent exposure.
+# DO NOT enable this function without enterprise policy approval.
+# ----------------------------
+def _rule_based_strategies_DISABLED(latest_run: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """DISABLED: Contains advisory content. Do not call."""
     if not latest_run:
         return []
 
