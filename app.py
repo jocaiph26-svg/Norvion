@@ -389,7 +389,7 @@ app.add_middleware(
     secret_key=_SESSION_SECRET,
     same_site="lax",
     https_only=(not _demo_mode_env),
-    max_age=60 * 60 * 24 * 14,  # 14 days
+    max_age=3600,  # 1 hour session (temporarily changed from None to debug session issues)
 )
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -1599,18 +1599,23 @@ def _validate_csrf(request: Request, form_token: Optional[str] = None) -> bool:
     """
     try:
         session_token = request.session.get(CSRF_SESSION_KEY)
+        logger.info("CSRF validation - session_token: %s, form_token: %s", session_token[:20] if session_token else "None", form_token[:20] if form_token else "None")
         if not session_token:
+            logger.warning("No CSRF token in session")
             return False
 
         # Check form field first
         if form_token:
-            return hmac.compare_digest(str(form_token), str(session_token))
+            result = hmac.compare_digest(str(form_token), str(session_token))
+            logger.info("CSRF form token comparison: %s", result)
+            return result
 
         # Check header
         header_token = request.headers.get(CSRF_HEADER_NAME)
         if header_token:
             return hmac.compare_digest(str(header_token), str(session_token))
 
+        logger.warning("No CSRF token in form or header")
         return False
     except Exception:
         return False
@@ -1639,7 +1644,7 @@ def _require_csrf(request: Request, form_token: Optional[str] = None) -> None:
 
     # Validate CSRF token
     if not _validate_csrf(request, form_token):
-        logger.warning("CSRF validation failed for %s from %s", path, _get_client_ip(request))
+        logger.warning("CSRF validation failed for %s from %s - form_token: %s", path, _get_client_ip(request), "present" if form_token else "missing")
         raise HTTPException(status_code=403, detail="CSRF validation failed")
 
 
@@ -4401,9 +4406,11 @@ async def tos_page(request: Request, next: Optional[str] = Query(None)):
 @app.post("/tos")
 async def tos_accept(request: Request, csrf_token: Optional[str] = Form(None), next: Optional[str] = Form(None)):
     """Process TOS acceptance."""
+    logger.info("TOS POST received - csrf_token: %s, next: %s", "present" if csrf_token else "missing", next)
     _require_csrf(request, csrf_token)
     _require_auth(request)
     user_id = _current_user_id(request)
+    logger.info("TOS POST - user_id: %s", user_id)
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
 
@@ -4848,6 +4855,7 @@ async def admin_update_user(
 # ----------------------------
 @app.get("/", response_class=RedirectResponse)
 def home_redirect(request: Request):
+    _require_auth(request)  # Check auth before redirect to prevent page flash
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "home")
     return RedirectResponse(url="/dashboard", status_code=302)
 
@@ -5816,6 +5824,7 @@ def weekly_digest_redirect(request: Request):
 # ----------------------------
 @app.get("/dashboard", response_class=HTMLResponse)
 def unified_dashboard(request: Request, tab: str = "overview", run_id: Optional[int] = Query(None)):
+    _require_auth(request)  # Check auth first to prevent page flash
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "dashboard")
     active_run, latest_run_actual = _active_and_latest(request, run_id)
     run_scope = _run_scope_context(active_run, latest_run_actual)
