@@ -79,24 +79,75 @@ import os
 import math
 import re
 import time
+import secrets
+import hmac
+from functools import wraps
 from dataclasses import dataclass, field
 # TIMESTAMP POLICY: All timestamps use UTC (datetime.utcnow()).
 # Stored timestamps are ISO 8601 strings without timezone suffix.
 # Consumers should treat all timestamps as UTC.
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Tuple, Optional, Union
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Tuple, Optional, Union, Callable
 from pathlib import Path
 from contextlib import contextmanager
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, File, UploadFile, Form, Query, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, Query, HTTPException, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from jinja2 import TemplateNotFound
 from starlette.requests import Request
 from starlette.middleware.sessions import SessionMiddleware
+
+# ----------------------------
+# Password Hashing (werkzeug-compatible PBKDF2)
+# ----------------------------
+# Using built-in hashlib for PBKDF2 to avoid new dependencies.
+# This matches werkzeug.security semantics but uses stdlib only.
+PBKDF2_ITERATIONS = 260000  # OWASP 2023 recommendation
+PBKDF2_HASH_FUNC = "sha256"
+SALT_LENGTH = 16
+
+def generate_password_hash(password: str) -> str:
+    """Generate a PBKDF2-SHA256 password hash."""
+    if not password:
+        raise ValueError("Password cannot be empty")
+    salt = secrets.token_hex(SALT_LENGTH)
+    dk = hashlib.pbkdf2_hmac(
+        PBKDF2_HASH_FUNC,
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PBKDF2_ITERATIONS,
+    )
+    return f"pbkdf2:sha256:{PBKDF2_ITERATIONS}${salt}${dk.hex()}"
+
+def check_password_hash(pwhash: str, password: str) -> bool:
+    """Verify a password against a PBKDF2-SHA256 hash."""
+    if not pwhash or not password:
+        return False
+    try:
+        if not pwhash.startswith("pbkdf2:sha256:"):
+            return False
+        parts = pwhash.split("$")
+        if len(parts) != 3:
+            return False
+        header, salt, stored_hash = parts
+        iterations = int(header.split(":")[-1])
+        dk = hashlib.pbkdf2_hmac(
+            PBKDF2_HASH_FUNC,
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            iterations,
+        )
+        return hmac.compare_digest(dk.hex(), stored_hash)
+    except Exception:
+        return False
+
+# Password policy constants
+PASSWORD_MIN_LENGTH = 12
+PASSWORD_MAX_LENGTH = 128
 
 def _rule_inventory_hash() -> str:
     """Deterministic hash of current rule inventory for auditability."""
@@ -118,8 +169,40 @@ CONFIG_VERSION = "v1"
 CONFIG_MIGRATION_POLICY = "manual"
 ACCESS_ROLE_HEADER = "X-Access-Role"
 ACCESS_ACTOR_HEADER = "X-Actor-ID"
-ACCESS_ROLES = ["viewer", "auditor", "admin"]
+# Updated RBAC roles: viewer < auditor < operator < manager < admin
+# viewer: basic read-only access
+# auditor: read-only with access to audit trails, reports, and exports (no modifications)
+# operator: can upload, update alert status/note
+# manager: can view settings/config (not change)
+# admin: full access including settings changes and user management
+AUTH_ROLES = ["viewer", "auditor", "operator", "manager", "admin"]
+ACCESS_ROLES = AUTH_ROLES  # Backward compatibility alias
 RULE_CHANGE_STATUSES = {"draft", "approved", "active"}
+
+# ----------------------------
+# Authentication constants
+# ----------------------------
+AUTH_SESSION_KEY = "auth_user_id"
+AUTH_TENANT_KEY = "auth_tenant_id"
+AUTH_ROLE_KEY = "auth_user_role"
+AUTH_EMAIL_KEY = "auth_user_email"
+STEPUP_SESSION_KEY = "stepup_verified_at"
+STEPUP_VALIDITY_SECONDS = 600  # 10 minutes
+RESET_TOKEN_EXPIRY_HOURS = 1
+DEV_MAIL_OUTBOX_FILE = "dev_mail_outbox.json"
+MAX_DEV_OUTBOX_ENTRIES = 50
+
+# Routes that don't require authentication
+PUBLIC_ROUTES = {
+    "/login",
+    "/logout",
+    "/forgot-password",
+    "/healthz",
+}
+PUBLIC_ROUTE_PREFIXES = (
+    "/static/",
+    "/reset-password/",
+)
 
 _CODE_HASH_CACHE: Optional[str] = None
 
@@ -166,6 +249,10 @@ LEDGER_V1_COLUMNS = [
 MAX_RULE_TEXT_LEN = 200
 MAX_RULES_RETURN = 2000
 
+# TOS (Terms of Service) version - increment when TOS changes to require re-acceptance
+TOS_VERSION = "1.0"
+TOS_ROUTES_EXEMPT = ("/tos", "/logout", "/static/", "/login", "/api/health")
+
 # ----------------------------
 # Logging (demo-safe)
 # ----------------------------
@@ -203,17 +290,71 @@ def _rate_limit_allow(key: str, limit: int, window_s: int) -> bool:
 app = FastAPI(title=APP_TITLE)
 # Session middleware is used only to persist selected run context across pages.
 # This uses Starlette's built-in session support (no new dependencies).
-_SESSION_SECRET = os.getenv('SME_EW_SESSION_SECRET', 'CHANGE_ME_DEMO_SESSION_SECRET')
+_SESSION_SECRET_RAW = os.getenv('SME_EW_SESSION_SECRET', '')
 _SME_EW_ENV = os.getenv('SME_EW_ENV', 'development').strip().lower()
-if _SESSION_SECRET == "CHANGE_ME_DEMO_SESSION_SECRET":
-    if _SME_EW_ENV == "production":
-        raise RuntimeError(
-            "FATAL: SME_EW_SESSION_SECRET must be set in production mode. "
-            "Refusing to start with demo default secret."
+_SESSION_SECRET_DEMO_DEFAULT = "CHANGE_ME_DEMO_SESSION_SECRET"
+
+# Production-safe session secret enforcement
+_session_secret_missing = not _SESSION_SECRET_RAW or not _SESSION_SECRET_RAW.strip()
+_session_secret_is_demo = _SESSION_SECRET_RAW == _SESSION_SECRET_DEMO_DEFAULT
+
+if _SME_EW_ENV == "production":
+    if _session_secret_missing:
+        logger.critical(
+            "FATAL: SME_EW_SESSION_SECRET is missing or empty in production mode. "
+            "Set a cryptographically secure session secret. Refusing to start."
         )
-    logger.warning(
-        "SME_EW_SESSION_SECRET is using the demo default. Set an env var for safer sessions."
-    )
+        sys.exit(1)
+    if _session_secret_is_demo:
+        logger.critical(
+            "FATAL: SME_EW_SESSION_SECRET must not be the demo default in production mode. "
+            "Set a cryptographically secure session secret. Refusing to start."
+        )
+        sys.exit(1)
+    _SESSION_SECRET = _SESSION_SECRET_RAW
+else:
+    # Non-production: use demo default if not set, but warn
+    if _session_secret_missing:
+        _SESSION_SECRET = _SESSION_SECRET_DEMO_DEFAULT
+        logger.warning(
+            "SME_EW_SESSION_SECRET is not set. Using demo default. "
+            "Set an env var for safer sessions in non-demo deployments."
+        )
+    elif _session_secret_is_demo:
+        _SESSION_SECRET = _SESSION_SECRET_RAW
+        logger.warning(
+            "SME_EW_SESSION_SECRET is using the demo default. "
+            "Set a unique env var for safer sessions."
+        )
+    else:
+        _SESSION_SECRET = _SESSION_SECRET_RAW
+
+# ----------------------------
+# Webhook secret startup validation
+# ----------------------------
+_WEBHOOK_SECRET_DEMO_DEFAULT = "CHANGE_ME_DEMO_SECRET"
+_WEBHOOK_SECRET_ENV = os.getenv("SME_EW_WEBHOOK_SECRET", "")
+
+if _SME_EW_ENV == "production":
+    if _WEBHOOK_SECRET_ENV == _WEBHOOK_SECRET_DEMO_DEFAULT:
+        logger.critical(
+            "FATAL: SME_EW_WEBHOOK_SECRET must not be the demo default in production mode. "
+            "Set a cryptographically secure webhook secret. Refusing to start."
+        )
+        sys.exit(1)
+    if not _WEBHOOK_SECRET_ENV:
+        # Warn but don't fail - webhook secret can also be set in DB settings
+        # Runtime check in webhook handler will reject demo defaults
+        logger.warning(
+            "SME_EW_WEBHOOK_SECRET environment variable not set in production. "
+            "Webhook ingestion will fail unless a secure secret is configured in tenant settings."
+        )
+else:
+    if not _WEBHOOK_SECRET_ENV:
+        logger.info(
+            "SME_EW_WEBHOOK_SECRET not set. Using database settings or demo default for webhooks."
+        )
+
 def _parse_bool(v: Any, default: bool = False) -> bool:
     if isinstance(v, bool):
         return v
@@ -448,6 +589,74 @@ def _insert_run_row(
 def db_init() -> None:
     with db_conn() as conn:
         cur = conn.cursor()
+
+        # ----------------------------
+        # Authentication tables (Phase 1-5)
+        # ----------------------------
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id TEXT NOT NULL,
+            email TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'viewer',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            last_login_at TEXT,
+            UNIQUE(tenant_id, email)
+        )
+        """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+
+        # Migration: Add tos_accepted_at column for TOS acceptance tracking
+        if not _table_has_column(conn, "users", "tos_accepted_at"):
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN tos_accepted_at TEXT")
+            except Exception:
+                pass
+        if not _table_has_column(conn, "users", "tos_version"):
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN tos_version TEXT")
+            except Exception:
+                pass
+
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reset_tokens_user ON password_reset_tokens(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reset_tokens_hash ON password_reset_tokens(token_hash)")
+
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS auth_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            actor_id TEXT,
+            user_id INTEGER,
+            event_type TEXT NOT NULL,
+            target_user_id INTEGER,
+            details_json TEXT,
+            ip_address TEXT
+        )
+        """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_auth_audit_created ON auth_audit_log(created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_auth_audit_tenant ON auth_audit_log(tenant_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_auth_audit_user ON auth_audit_log(user_id)")
 
         cur.execute(
             """
@@ -699,6 +908,13 @@ def db_init() -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_vendor_rules_priority ON vendor_rules(priority)"
         )
+        # Migration: Add tenant_id to vendor_rules for multi-tenant isolation
+        if not _table_has_column(conn, "vendor_rules", "tenant_id"):
+            try:
+                cur.execute("ALTER TABLE vendor_rules ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_vendor_rules_tenant ON vendor_rules(tenant_id)")
+            except Exception:
+                pass
 
         cur.execute(
             """
@@ -717,6 +933,13 @@ def db_init() -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_description_rules_priority ON description_rules(priority)"
         )
+        # Migration: Add tenant_id to description_rules for multi-tenant isolation
+        if not _table_has_column(conn, "description_rules", "tenant_id"):
+            try:
+                cur.execute("ALTER TABLE description_rules ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_description_rules_tenant ON description_rules(tenant_id)")
+            except Exception:
+                pass
 
         # ---- Manual categorisation overrides (forward-only) ----
         cur.execute(
@@ -815,6 +1038,32 @@ def db_init() -> None:
                     "INSERT INTO integrations (provider, is_enabled, config_json, updated_at) VALUES (?, 0, '{}', ?)",
                     (provider, datetime.utcnow().isoformat()),
                 )
+
+        # Seed demo admin user if no users exist
+        # Password: Demo123!Admin (printed to console on first run in dev mode)
+        user_count = cur.execute("SELECT COUNT(*) AS c FROM users").fetchone()
+        if int(user_count["c"]) == 0:
+            demo_password = os.getenv("SME_EW_DEMO_ADMIN_PASSWORD", "Demo123!Admin")
+            demo_email = os.getenv("SME_EW_DEMO_ADMIN_EMAIL", "admin@demo.local")
+            demo_tenant = TENANT_DEFAULT
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO users (tenant_id, email, password_hash, role, is_active, created_at)
+                    VALUES (?, ?, ?, 'admin', 1, ?)
+                    """,
+                    (demo_tenant, demo_email, generate_password_hash(demo_password), datetime.utcnow().isoformat()),
+                )
+                if _SME_EW_ENV != "production":
+                    logger.info("=" * 60)
+                    logger.info("DEMO ADMIN USER CREATED")
+                    logger.info("  Email: %s", demo_email)
+                    logger.info("  Password: %s", demo_password)
+                    logger.info("  Tenant: %s", demo_tenant)
+                    logger.info("  Role: admin")
+                    logger.info("=" * 60)
+            except Exception as e:
+                logger.warning("Could not seed demo admin user: %s", e)
 
         conn.commit()
 
@@ -931,6 +1180,20 @@ def _effective_webhook_secret(settings: Dict[str, Any]) -> str:
     return str(settings.get("webhook_secret") or "")
 
 
+def _require_dev_mode(request: Request) -> None:
+    """
+    Hard-gate for dev/test routes. In production mode, returns 404 to avoid
+    acknowledging that dev routes exist. This is a security measure.
+    """
+    if _SME_EW_ENV == "production":
+        raise HTTPException(status_code=404, detail="Not found")
+    # Additionally check tenant-level demo_mode setting
+    tenant_id = _tenant_id(request)
+    s = read_settings(tenant_id)
+    if not _parse_bool(s.get("demo_mode", True), default=True):
+        raise HTTPException(status_code=404, detail="Not found")
+
+
 # ----------------------------
 # DISABLED: AI explanation scaffolding
 # ----------------------------
@@ -1023,54 +1286,204 @@ def _run_row_for_tenant(run_id: int, tenant_id: str) -> Optional[sqlite3.Row]:
 
 
 # ----------------------------
+# Authentication helpers (Phase 1-5)
+# ----------------------------
+def _get_client_ip(request: Request) -> str:
+    """Get client IP for audit logging."""
+    try:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        if request.client:
+            return str(request.client.host)
+    except Exception:
+        pass
+    return ""
+
+def _is_authenticated(request: Request) -> bool:
+    """Check if user is logged in via session."""
+    try:
+        return bool(request.session.get(AUTH_SESSION_KEY))
+    except Exception:
+        return False
+
+def _current_user_id(request: Request) -> Optional[int]:
+    """Get current user ID from session."""
+    try:
+        uid = request.session.get(AUTH_SESSION_KEY)
+        return int(uid) if uid else None
+    except Exception:
+        return None
+
+def _get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
+    """Fetch user by ID."""
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT id, tenant_id, email, role, is_active, created_at, last_login_at FROM users WHERE id = ?",
+            (int(user_id),),
+        ).fetchone()
+        if row:
+            return {
+                "id": int(row["id"]),
+                "tenant_id": str(row["tenant_id"]),
+                "email": str(row["email"]),
+                "role": str(row["role"]),
+                "is_active": bool(row["is_active"]),
+                "created_at": str(row["created_at"]),
+                "last_login_at": str(row["last_login_at"]) if row["last_login_at"] else None,
+            }
+    return None
+
+def _get_user_by_email(email: str, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Fetch user by email (optionally scoped to tenant)."""
+    with db_conn() as conn:
+        if tenant_id:
+            row = conn.execute(
+                "SELECT id, tenant_id, email, password_hash, role, is_active, created_at FROM users WHERE email = ? AND tenant_id = ?",
+                (email.lower().strip(), tenant_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT id, tenant_id, email, password_hash, role, is_active, created_at FROM users WHERE email = ?",
+                (email.lower().strip(),),
+            ).fetchone()
+        if row:
+            return {
+                "id": int(row["id"]),
+                "tenant_id": str(row["tenant_id"]),
+                "email": str(row["email"]),
+                "password_hash": str(row["password_hash"]),
+                "role": str(row["role"]),
+                "is_active": bool(row["is_active"]),
+                "created_at": str(row["created_at"]),
+            }
+    return None
+
+def _log_auth_event(
+    tenant_id: str,
+    event_type: str,
+    user_id: Optional[int] = None,
+    actor_id: Optional[str] = None,
+    target_user_id: Optional[int] = None,
+    details: Optional[Dict[str, Any]] = None,
+    ip_address: Optional[str] = None,
+) -> None:
+    """Log authentication/authorization events for audit."""
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO auth_audit_log
+                (created_at, tenant_id, actor_id, user_id, event_type, target_user_id, details_json, ip_address)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.utcnow().isoformat(),
+                    str(tenant_id),
+                    str(actor_id or ""),
+                    user_id,
+                    str(event_type),
+                    target_user_id,
+                    json.dumps(details) if details else None,
+                    str(ip_address or ""),
+                ),
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+def _validate_password(password: str) -> Tuple[bool, str]:
+    """Validate password meets policy. Returns (valid, error_message)."""
+    if not password:
+        return False, "Password is required"
+    if len(password) < PASSWORD_MIN_LENGTH:
+        return False, f"Password must be at least {PASSWORD_MIN_LENGTH} characters"
+    if len(password) > PASSWORD_MAX_LENGTH:
+        return False, f"Password cannot exceed {PASSWORD_MAX_LENGTH} characters"
+    return True, ""
+
+# ----------------------------
 # Run context helpers (selected run persistence)
 # ----------------------------
 def _tenant_id(request: Optional[Request]) -> str:
+    """Get tenant ID from authenticated session (Phase 2: session-only, no headers)."""
     if request is None:
         return TENANT_DEFAULT
+    # Primary: get from authenticated session
     try:
-        raw = request.headers.get(TENANT_HEADER)
+        session_tenant = request.session.get(AUTH_TENANT_KEY)
+        if session_tenant:
+            safe = re.sub(r"[^A-Za-z0-9_-]", "", str(session_tenant).strip())
+            return safe or TENANT_DEFAULT
     except Exception:
-        raw = None
-    if raw is None:
-        return TENANT_DEFAULT
-    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(raw).strip())
-    return safe or TENANT_DEFAULT
+        pass
+    # Fallback for dev mode ONLY: allow header if SME_EW_DEV_BYPASS=true AND localhost
+    dev_bypass_enabled = _parse_bool(os.getenv("SME_EW_DEV_BYPASS", "false"), default=False)
+    if dev_bypass_enabled:
+        try:
+            client_host = str(request.client.host if request.client else "")
+            if client_host in ("127.0.0.1", "::1", "localhost"):
+                raw = request.headers.get(TENANT_HEADER)
+                if raw:
+                    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(raw).strip())
+                    return safe or TENANT_DEFAULT
+        except Exception:
+            pass
+    return TENANT_DEFAULT
 
 
 def _access_role(request: Optional[Request]) -> str:
+    """Get user role from authenticated session (Phase 2/3: session-only)."""
     if request is None:
         return "viewer"
+    # Primary: get from authenticated session
     try:
-        raw = str(request.headers.get(ACCESS_ROLE_HEADER) or "").strip().lower()
+        session_role = request.session.get(AUTH_ROLE_KEY)
+        if session_role and session_role in AUTH_ROLES:
+            return str(session_role)
     except Exception:
-        raw = ""
-    # Dev bypass: localhost requests default to admin ONLY if SME_EW_DEV_BYPASS=true
-    if not raw or raw not in ACCESS_ROLES:
-        dev_bypass_enabled = _parse_bool(os.getenv("SME_EW_DEV_BYPASS", "false"), default=False)
-        if dev_bypass_enabled:
-            try:
-                client_host = str(request.client.host if request.client else "")
-                if client_host in ("127.0.0.1", "::1", "localhost"):
-                    return "admin"
-            except Exception:
-                pass
-    return raw if raw in ACCESS_ROLES else "viewer"
+        pass
+    # Fallback for dev mode ONLY
+    dev_bypass_enabled = _parse_bool(os.getenv("SME_EW_DEV_BYPASS", "false"), default=False)
+    if dev_bypass_enabled:
+        try:
+            client_host = str(request.client.host if request.client else "")
+            if client_host in ("127.0.0.1", "::1", "localhost"):
+                # Check header for dev testing
+                raw = str(request.headers.get(ACCESS_ROLE_HEADER) or "").strip().lower()
+                if raw in AUTH_ROLES:
+                    return raw
+                return "admin"  # Dev bypass defaults to admin
+        except Exception:
+            pass
+    return "viewer"
 
 
 def _actor_id(request: Optional[Request]) -> str:
+    """Get actor ID (email) from authenticated session."""
     if request is None:
         return ""
     try:
-        raw = str(request.headers.get(ACCESS_ACTOR_HEADER) or "").strip()
+        email = request.session.get(AUTH_EMAIL_KEY)
+        if email:
+            return _safe_text(str(email), 120)
     except Exception:
-        raw = ""
-    return _safe_text(raw, 120)
+        pass
+    # Dev fallback
+    dev_bypass_enabled = _parse_bool(os.getenv("SME_EW_DEV_BYPASS", "false"), default=False)
+    if dev_bypass_enabled:
+        try:
+            raw = str(request.headers.get(ACCESS_ACTOR_HEADER) or "").strip()
+            return _safe_text(raw, 120)
+        except Exception:
+            pass
+    return ""
 
 
 def _role_rank(role: str) -> int:
+    """Get numeric rank for role comparison."""
     try:
-        return ACCESS_ROLES.index(role)
+        return AUTH_ROLES.index(role)
     except Exception:
         return 0
 
@@ -1107,12 +1520,127 @@ def _log_access(
 
 
 def _require_role(request: Request, min_role: str, action: str, resource: str) -> str:
+    """Require minimum role for action. Raises HTTPException if denied."""
+    # First check TOS acceptance for non-exempt routes
+    _require_tos(request)
     role = _access_role(request)
     allowed = _role_rank(role) >= _role_rank(min_role)
     _log_access(_tenant_id(request), _actor_id(request), role, action, resource, allowed)
     if not allowed:
         raise HTTPException(status_code=403, detail="forbidden")
     return role
+
+
+def _require_stepup(request: Request) -> bool:
+    """Check if step-up authentication is valid (Phase 5)."""
+    try:
+        stepup_at = request.session.get(STEPUP_SESSION_KEY)
+        if not stepup_at:
+            return False
+        stepup_time = datetime.fromisoformat(str(stepup_at))
+        now = datetime.utcnow()
+        return (now - stepup_time).total_seconds() < STEPUP_VALIDITY_SECONDS
+    except Exception:
+        return False
+
+
+def _set_stepup(request: Request) -> None:
+    """Set step-up verification timestamp in session."""
+    try:
+        request.session[STEPUP_SESSION_KEY] = datetime.utcnow().isoformat()
+    except Exception:
+        pass
+
+
+def _clear_stepup(request: Request) -> None:
+    """Clear step-up verification from session."""
+    try:
+        request.session.pop(STEPUP_SESSION_KEY, None)
+    except Exception:
+        pass
+
+
+# ----------------------------
+# CSRF Protection (P0-08)
+# ----------------------------
+CSRF_SESSION_KEY = "_csrf_token"
+CSRF_FORM_FIELD = "csrf_token"
+CSRF_HEADER_NAME = "X-CSRF-Token"
+
+# Routes exempt from CSRF (API endpoints using Bearer auth, webhooks, login)
+CSRF_EXEMPT_ROUTES = frozenset((
+    "/login",
+    "/api/webhook/ingest",
+    "/api/health",
+))
+CSRF_EXEMPT_PREFIXES = (
+    "/api/ui/",  # Read-only API endpoints
+    "/static/",
+)
+
+
+def _get_csrf_token(request: Request) -> str:
+    """Get or create CSRF token for the session."""
+    try:
+        token = request.session.get(CSRF_SESSION_KEY)
+        if not token:
+            token = secrets.token_urlsafe(32)
+            request.session[CSRF_SESSION_KEY] = token
+        return str(token)
+    except Exception:
+        # Fallback if session unavailable
+        return secrets.token_urlsafe(32)
+
+
+def _validate_csrf(request: Request, form_token: Optional[str] = None) -> bool:
+    """
+    Validate CSRF token from form or header against session.
+    Returns True if valid, False otherwise.
+    """
+    try:
+        session_token = request.session.get(CSRF_SESSION_KEY)
+        if not session_token:
+            return False
+
+        # Check form field first
+        if form_token:
+            return hmac.compare_digest(str(form_token), str(session_token))
+
+        # Check header
+        header_token = request.headers.get(CSRF_HEADER_NAME)
+        if header_token:
+            return hmac.compare_digest(str(header_token), str(session_token))
+
+        return False
+    except Exception:
+        return False
+
+
+def _require_csrf(request: Request, form_token: Optional[str] = None) -> None:
+    """
+    Require valid CSRF token. Raises HTTPException if invalid.
+    Skips validation for exempt routes and non-HTML requests.
+    """
+    path = request.url.path
+
+    # Check exempt routes
+    if path in CSRF_EXEMPT_ROUTES:
+        return
+    for prefix in CSRF_EXEMPT_PREFIXES:
+        if path.startswith(prefix):
+            return
+
+    # Skip for API requests (they use Bearer tokens, not session auth)
+    content_type = str(request.headers.get("content-type") or "").lower()
+    accept = str(request.headers.get("accept") or "").lower()
+    if "application/json" in content_type and "text/html" not in accept:
+        # JSON API request - typically uses different auth mechanism
+        return
+
+    # Validate CSRF token
+    if not _validate_csrf(request, form_token):
+        logger.warning("CSRF validation failed for %s from %s", path, _get_client_ip(request))
+        raise HTTPException(status_code=403, detail="CSRF validation failed")
 
 
 def _session_key_for_tenant(tenant_id: str) -> str:
@@ -1371,6 +1899,8 @@ def _render_or_fallback(
         context.setdefault("access_role", _access_role(request))
         context.setdefault("access_actor", _actor_id(request))
         context.setdefault("access_tenant", _tenant_id(request))
+        # Add CSRF token to all rendered templates
+        context.setdefault("csrf_token", _get_csrf_token(request))
     except Exception:
         pass
     try:
@@ -1621,6 +2151,30 @@ def _safe_text(x: Any, max_len: int = 200) -> str:
     return s
 
 
+# CSV formula injection protection characters
+_CSV_FORMULA_CHARS = frozenset(("=", "+", "-", "@", "\t", "\r", "\n"))
+
+
+def _safe_csv_cell(x: Any) -> str:
+    """
+    Sanitize a value for CSV export to prevent formula injection.
+    Spreadsheet applications (Excel, Google Sheets, LibreOffice Calc) interpret
+    cells starting with =, +, -, @ as formulas. This can be exploited to execute
+    arbitrary commands when users open the CSV.
+
+    Defense: Prefix dangerous cells with a single quote (') which is the standard
+    Excel escape for formula prevention and is generally invisible to users.
+    """
+    s = str(x) if x is not None else ""
+    # Replace newlines and carriage returns with spaces
+    s = s.replace("\n", " ").replace("\r", " ")
+    # Check if first character is a formula trigger
+    if s and s[0] in _CSV_FORMULA_CHARS:
+        # Prefix with single quote - Excel's formula escape
+        return "'" + s
+    return s
+
+
 def _safe_match_type(v: Any, allowed: set, default: str) -> str:
     s = str(v or "").strip().lower()
     return s if s in allowed else default
@@ -1667,17 +2221,31 @@ def _confidence_for_rule(source: str, match_type: str) -> str:
 # ----------------------------
 # Deterministic categorisation rules engine
 # ----------------------------
-def _load_vendor_rules(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
-    rows = conn.execute(
-        """
-        SELECT id, vendor, match_type, category, is_enabled, priority, note, updated_at
-        FROM vendor_rules
-        WHERE is_enabled = 1
-        ORDER BY priority ASC, id ASC
-        LIMIT ?
-        """,
-        (MAX_RULES_RETURN,),
-    ).fetchall()
+def _load_vendor_rules(conn: sqlite3.Connection, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    tenant_key = _normalize_tenant_id(tenant_id) if tenant_id else TENANT_DEFAULT
+    # Load tenant-specific rules, falling back to default tenant rules if none exist
+    if _table_has_column(conn, "vendor_rules", "tenant_id"):
+        rows = conn.execute(
+            """
+            SELECT id, vendor, match_type, category, is_enabled, priority, note, updated_at
+            FROM vendor_rules
+            WHERE is_enabled = 1 AND (tenant_id = ? OR tenant_id = 'default')
+            ORDER BY CASE WHEN tenant_id = ? THEN 0 ELSE 1 END, priority ASC, id ASC
+            LIMIT ?
+            """,
+            (tenant_key, tenant_key, MAX_RULES_RETURN),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, vendor, match_type, category, is_enabled, priority, note, updated_at
+            FROM vendor_rules
+            WHERE is_enabled = 1
+            ORDER BY priority ASC, id ASC
+            LIMIT ?
+            """,
+            (MAX_RULES_RETURN,),
+        ).fetchall()
     out: List[Dict[str, Any]] = []
     for r in rows:
         out.append(
@@ -1694,17 +2262,31 @@ def _load_vendor_rules(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return out
 
 
-def _load_description_rules(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
-    rows = conn.execute(
-        """
-        SELECT id, pattern, match_type, category, is_enabled, priority, note, updated_at
-        FROM description_rules
-        WHERE is_enabled = 1
-        ORDER BY priority ASC, id ASC
-        LIMIT ?
-        """,
-        (MAX_RULES_RETURN,),
-    ).fetchall()
+def _load_description_rules(conn: sqlite3.Connection, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    tenant_key = _normalize_tenant_id(tenant_id) if tenant_id else TENANT_DEFAULT
+    # Load tenant-specific rules, falling back to default tenant rules if none exist
+    if _table_has_column(conn, "description_rules", "tenant_id"):
+        rows = conn.execute(
+            """
+            SELECT id, pattern, match_type, category, is_enabled, priority, note, updated_at
+            FROM description_rules
+            WHERE is_enabled = 1 AND (tenant_id = ? OR tenant_id = 'default')
+            ORDER BY CASE WHEN tenant_id = ? THEN 0 ELSE 1 END, priority ASC, id ASC
+            LIMIT ?
+            """,
+            (tenant_key, tenant_key, MAX_RULES_RETURN),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, pattern, match_type, category, is_enabled, priority, note, updated_at
+            FROM description_rules
+            WHERE is_enabled = 1
+            ORDER BY priority ASC, id ASC
+            LIMIT ?
+            """,
+            (MAX_RULES_RETURN,),
+        ).fetchall()
     out: List[Dict[str, Any]] = []
     for r in rows:
         out.append(
@@ -3366,7 +3948,7 @@ def _insight_narratives(
         out.append(
             {
                 "title": "Runway",
-                "text": f"Modeled runway (static burn) is {float(runway_days):.0f} days based on average daily burn of {money(avg_daily_burn, currency)} over {burn_days} days.",
+                "text": f"Calculated runway (static burn) is {float(runway_days):.0f} days based on average daily burn of {money(avg_daily_burn, currency)} over {burn_days} days.",
                 "evidence": {
                     "runway_days": float(runway_days or 0.0),
                     "avg_daily_burn": avg_daily_burn,
@@ -3466,6 +4048,802 @@ def _build_run_params(
 
 
 # ----------------------------
+# Authentication Guard (Phase 1)
+# ----------------------------
+# NOTE: We use a simple route-level check pattern instead of middleware.
+# The @app.middleware("http") approach was causing session cookies to not persist
+# because responses returned directly from middleware bypass SessionMiddleware's
+# response processing (which commits the session cookie).
+#
+# Solution: Check auth at the start of each protected route, or use the
+# 401 exception handler to redirect. The login route sets the session normally.
+
+def _auth_guard(request: Request) -> bool:
+    """
+    Check if request should be allowed through.
+    Returns True if allowed, False if should redirect to login.
+    For use at the start of route handlers if needed.
+    """
+    path = request.url.path
+
+    # Allow public routes
+    if path in PUBLIC_ROUTES:
+        return True
+
+    # Allow public prefixes
+    for prefix in PUBLIC_ROUTE_PREFIXES:
+        if path.startswith(prefix):
+            return True
+
+    # Check if authenticated
+    if _is_authenticated(request):
+        # Verify user is still active
+        user_id = _current_user_id(request)
+        if user_id:
+            user = _get_user_by_id(user_id)
+            if user and user.get("is_active"):
+                return True
+            # User deactivated - clear session
+            request.session.clear()
+        return False
+
+    # Check dev bypass mode
+    dev_bypass_enabled = _parse_bool(os.getenv("SME_EW_DEV_BYPASS", "false"), default=False)
+    if dev_bypass_enabled:
+        try:
+            client_host = str(request.client.host if request.client else "")
+            if client_host in ("127.0.0.1", "::1", "localhost"):
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def _require_auth(request: Request):
+    """Raise HTTPException if not authenticated."""
+    if not _auth_guard(request):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+
+def _has_accepted_tos(request: Request) -> bool:
+    """Check if the current user has accepted the current TOS version."""
+    user_id = _current_user_id(request)
+    if not user_id:
+        return False
+    user = _get_user_by_id(user_id)
+    if not user:
+        return False
+    accepted_version = user.get("tos_version")
+    return accepted_version == TOS_VERSION
+
+
+def _require_tos(request: Request):
+    """
+    Raise HTTPException if TOS not accepted.
+    Uses 428 (Precondition Required) to indicate TOS acceptance needed.
+    """
+    path = request.url.path
+    # Exempt routes from TOS check
+    for exempt in TOS_ROUTES_EXEMPT:
+        if path == exempt or path.startswith(exempt):
+            return
+    if not _has_accepted_tos(request):
+        raise HTTPException(status_code=428, detail="TOS acceptance required")
+
+
+# Custom 401 handler that redirects to login for HTML requests
+@app.exception_handler(401)
+async def unauthorized_handler(request: Request, exc: HTTPException):
+    """Handle 401 by redirecting to login for HTML, JSON for API."""
+    accept = str(request.headers.get("accept") or "").lower()
+    if "text/html" in accept:
+        return RedirectResponse(url="/login", status_code=302)
+    return JSONResponse({"detail": exc.detail or "Authentication required"}, status_code=401)
+
+
+# Custom 428 handler that redirects to TOS page for HTML requests
+@app.exception_handler(428)
+async def tos_required_handler(request: Request, exc: HTTPException):
+    """Handle 428 by redirecting to TOS page for HTML, JSON for API."""
+    accept = str(request.headers.get("accept") or "").lower()
+    if "text/html" in accept:
+        # Preserve original destination via 'next' parameter
+        original_path = str(request.url.path)
+        if original_path and original_path != "/tos":
+            from urllib.parse import quote
+            return RedirectResponse(url=f"/tos?next={quote(original_path)}", status_code=302)
+        return RedirectResponse(url="/tos", status_code=302)
+    return JSONResponse({"detail": exc.detail or "TOS acceptance required"}, status_code=428)
+
+
+# ----------------------------
+# Password Reset Token Helpers (Phase 4)
+# ----------------------------
+def _generate_reset_token() -> str:
+    """Generate a secure random token for password reset."""
+    return secrets.token_urlsafe(32)
+
+def _hash_reset_token(token: str) -> str:
+    """Hash reset token for storage."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+def _create_reset_token(user_id: int) -> str:
+    """Create and store a password reset token. Returns the raw token."""
+    token = _generate_reset_token()
+    token_hash = _hash_reset_token(token)
+    expires_at = (datetime.utcnow() + timedelta(hours=RESET_TOKEN_EXPIRY_HOURS)).isoformat()
+
+    with db_conn() as conn:
+        # Invalidate any existing tokens for this user
+        conn.execute("UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL",
+                    (datetime.utcnow().isoformat(), user_id))
+        conn.execute(
+            "INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, token_hash, expires_at, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    return token
+
+def _validate_reset_token(token: str) -> Optional[int]:
+    """Validate reset token. Returns user_id if valid, None otherwise."""
+    token_hash = _hash_reset_token(token)
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id, expires_at, used_at FROM password_reset_tokens WHERE token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if not row:
+            return None
+        if row["used_at"]:
+            return None  # Already used
+        try:
+            expires = datetime.fromisoformat(str(row["expires_at"]))
+            if datetime.utcnow() > expires:
+                return None  # Expired
+        except Exception:
+            return None
+        return int(row["user_id"])
+
+def _consume_reset_token(token: str) -> bool:
+    """Mark token as used. Returns True if successful."""
+    token_hash = _hash_reset_token(token)
+    with db_conn() as conn:
+        result = conn.execute(
+            "UPDATE password_reset_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL",
+            (datetime.utcnow().isoformat(), token_hash),
+        )
+        conn.commit()
+        return result.rowcount > 0
+
+def _dev_mail_outbox_add(recipient: str, subject: str, body: str, link: str) -> None:
+    """Add email to dev outbox (dev mode only)."""
+    if _SME_EW_ENV == "production":
+        logger.warning("Dev mail outbox not available in production")
+        return
+
+    outbox_path = BASE_DIR / DEV_MAIL_OUTBOX_FILE
+    entries = []
+    try:
+        if outbox_path.exists():
+            entries = json.loads(outbox_path.read_text())
+    except Exception:
+        entries = []
+
+    entries.append({
+        "id": secrets.token_hex(8),
+        "created_at": datetime.utcnow().isoformat(),
+        "recipient": recipient,
+        "subject": subject,
+        "body": body,
+        "link": link,
+    })
+
+    # Keep only last N entries
+    entries = entries[-MAX_DEV_OUTBOX_ENTRIES:]
+
+    try:
+        outbox_path.write_text(json.dumps(entries, indent=2))
+    except Exception as e:
+        logger.warning("Could not write dev mail outbox: %s", e)
+
+    # Also log to console in dev mode
+    logger.info("=" * 60)
+    logger.info("DEV MAIL OUTBOX - Password Reset Link")
+    logger.info("  To: %s", recipient)
+    logger.info("  Link: %s", link)
+    logger.info("=" * 60)
+
+
+# ----------------------------
+# Authentication Routes (Phase 1, 4)
+# ----------------------------
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, error: Optional[str] = Query(None)):
+    """Display login form."""
+    return _render_or_fallback(
+        request,
+        "login.html",
+        {
+            "request": request,
+            "title": "Login",
+            "error": error,
+        },
+        fallback_title="Login",
+        fallback_html="""
+        <form method="post" action="/login" style="max-width:400px;">
+            <div style="margin-bottom:16px;">
+                <label>Email</label><br>
+                <input type="email" name="email" required style="width:100%; padding:8px;">
+            </div>
+            <div style="margin-bottom:16px;">
+                <label>Password</label><br>
+                <input type="password" name="password" required style="width:100%; padding:8px;">
+            </div>
+            <button type="submit" style="padding:10px 20px;">Login</button>
+        </form>
+        <p><a href="/forgot-password">Forgot password?</a></p>
+        """,
+    )
+
+@app.post("/login")
+async def login_submit(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+):
+    """Process login form."""
+    ip_address = _get_client_ip(request)
+
+    # Rate limiting on login attempts
+    rate_key = f"login:{ip_address}"
+    if not _rate_limit_allow(rate_key, 10, 60):  # 10 attempts per minute
+        _log_auth_event(TENANT_DEFAULT, "login_rate_limited", ip_address=ip_address)
+        return RedirectResponse(url="/login?error=rate_limited", status_code=302)
+
+    # Find user
+    user = _get_user_by_email(email.lower().strip())
+
+    if not user:
+        _log_auth_event(TENANT_DEFAULT, "login_failed_no_user", details={"email": email}, ip_address=ip_address)
+        return RedirectResponse(url="/login?error=invalid", status_code=302)
+
+    if not user.get("is_active"):
+        _log_auth_event(user["tenant_id"], "login_failed_inactive", user_id=user["id"], ip_address=ip_address)
+        return RedirectResponse(url="/login?error=invalid", status_code=302)
+
+    if not check_password_hash(user.get("password_hash", ""), password):
+        _log_auth_event(user["tenant_id"], "login_failed_password", user_id=user["id"], ip_address=ip_address)
+        return RedirectResponse(url="/login?error=invalid", status_code=302)
+
+    # Success - set session
+    request.session[AUTH_SESSION_KEY] = user["id"]
+    request.session[AUTH_TENANT_KEY] = user["tenant_id"]
+    request.session[AUTH_ROLE_KEY] = user["role"]
+    request.session[AUTH_EMAIL_KEY] = user["email"]
+
+    # Update last login
+    with db_conn() as conn:
+        conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?",
+                    (datetime.utcnow().isoformat(), user["id"]))
+        conn.commit()
+
+    _log_auth_event(user["tenant_id"], "login_success", user_id=user["id"], ip_address=ip_address)
+
+    return RedirectResponse(url="/dashboard", status_code=302)
+
+@app.post("/logout")
+async def logout(request: Request, csrf_token: Optional[str] = Form(None)):
+    """Process logout."""
+    _require_csrf(request, csrf_token)
+    user_id = _current_user_id(request)
+    tenant_id = _tenant_id(request)
+    ip_address = _get_client_ip(request)
+
+    if user_id:
+        _log_auth_event(tenant_id, "logout", user_id=user_id, ip_address=ip_address)
+
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=302)
+
+@app.get("/logout")
+async def logout_get(request: Request):
+    """GET logout (convenience)."""
+    return await logout(request)
+
+
+# ----------------------------
+# TOS (Terms of Service) Routes
+# ----------------------------
+@app.get("/tos", response_class=HTMLResponse)
+async def tos_page(request: Request, next: Optional[str] = Query(None)):
+    """Display Terms of Service acceptance page."""
+    _require_auth(request)
+    user_id = _current_user_id(request)
+    user = _get_user_by_id(user_id) if user_id else None
+    already_accepted = user and user.get("tos_version") == TOS_VERSION
+
+    return _render_or_fallback(
+        request,
+        "tos.html",
+        {
+            "request": request,
+            "title": "Terms of Service",
+            "tos_version": TOS_VERSION,
+            "already_accepted": already_accepted,
+            "next": next,
+            "access_role": _access_role(request),
+            "access_actor": _actor_id(request),
+            "access_tenant": _tenant_id(request),
+        },
+        fallback_title="Terms of Service",
+        fallback_html=f"""
+        <h2>Terms of Service (v{TOS_VERSION})</h2>
+        <div style="max-width:700px; margin:20px 0; padding:16px; border:1px solid var(--border,#ddd); border-radius:4px; max-height:400px; overflow-y:auto;">
+            <h3>Disclaimer</h3>
+            <p><strong>Norvion is NOT financial advice.</strong> This tool provides deterministic analysis of uploaded transaction data for informational purposes only. It does not predict future outcomes, make autonomous decisions, or provide investment, accounting, or legal advice.</p>
+            <h3>Data Processing</h3>
+            <p>All analysis is performed locally using deterministic rules. No data is transmitted to external AI services or third parties for analysis. Your uploaded data remains within your environment.</p>
+            <h3>Limitation of Liability</h3>
+            <p>The information provided by this tool is for general informational purposes only. You are solely responsible for any decisions made based on this information. Consult qualified professionals for financial, legal, or business advice.</p>
+            <h3>Acceptance</h3>
+            <p>By clicking "I Accept", you acknowledge that you have read, understood, and agree to these terms.</p>
+        </div>
+        {"<p><em>You have already accepted this version.</em></p>" if already_accepted else ""}
+        <form method="post" action="/tos">
+            <button type="submit" style="padding:10px 20px; margin-right:10px;">I Accept</button>
+            <a href="/logout" style="padding:10px 20px; text-decoration:none; color:var(--muted);">Decline &amp; Logout</a>
+        </form>
+        """,
+    )
+
+
+@app.post("/tos")
+async def tos_accept(request: Request, csrf_token: Optional[str] = Form(None), next: Optional[str] = Form(None)):
+    """Process TOS acceptance."""
+    _require_csrf(request, csrf_token)
+    _require_auth(request)
+    user_id = _current_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Record TOS acceptance
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE users SET tos_accepted_at = ?, tos_version = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), TOS_VERSION, user_id),
+        )
+        conn.commit()
+
+    _log_auth_event(
+        _tenant_id(request),
+        "tos_accepted",
+        user_id=user_id,
+        details={"tos_version": TOS_VERSION},
+        ip_address=_get_client_ip(request),
+    )
+
+    logger.info("User %s accepted TOS version %s", user_id, TOS_VERSION)
+
+    # Redirect to original destination if provided, otherwise dashboard
+    redirect_url = "/"
+    if next and next.startswith("/") and not next.startswith("//"):
+        redirect_url = next
+    return RedirectResponse(url=redirect_url, status_code=302)
+
+
+@app.get("/forgot-password", response_class=HTMLResponse)
+async def forgot_password_page(request: Request, sent: Optional[str] = Query(None)):
+    """Display forgot password form."""
+    # In production, password reset is disabled without configured mail provider
+    is_disabled = _SME_EW_ENV == "production"
+
+    if is_disabled:
+        return _render_or_fallback(
+            request,
+            "error.html",
+            {
+                "request": request,
+                "title": "Feature Unavailable",
+                "error_title": "Password Reset Unavailable",
+                "error_message": "Self-service password reset is not available in this environment. Please contact your system administrator to reset your password.",
+                "schema_help": None,
+                "actions": [{"label": "Back to Login", "href": "/login"}],
+                "show_details": False,
+                "error_details": None,
+            },
+            fallback_title="Feature Unavailable",
+            fallback_html="""
+            <h2>Password Reset Unavailable</h2>
+            <p>Self-service password reset is not available in this environment.</p>
+            <p>Please contact your system administrator to reset your password.</p>
+            <p><a href="/login">Back to login</a></p>
+            """,
+        )
+
+    return _render_or_fallback(
+        request,
+        "forgot_password.html",
+        {
+            "request": request,
+            "title": "Forgot Password",
+            "sent": bool(sent),
+            "is_dev_mode": True,
+        },
+        fallback_title="Forgot Password",
+        fallback_html="""
+        <div style="background:#fff3cd; border:1px solid #ffc107; padding:12px; margin-bottom:16px; border-radius:4px;">
+            <strong>Development Mode:</strong> Reset links are logged to console and dev_mail_outbox.json (not emailed).
+        </div>
+        <p>Enter your email address to receive a password reset link.</p>
+        <form method="post" action="/forgot-password" style="max-width:400px;">
+            <div style="margin-bottom:16px;">
+                <label>Email</label><br>
+                <input type="email" name="email" required style="width:100%; padding:8px;">
+            </div>
+            <button type="submit" style="padding:10px 20px;">Send Reset Link</button>
+        </form>
+        <p><a href="/login">Back to login</a></p>
+        """,
+    )
+
+@app.post("/forgot-password")
+async def forgot_password_submit(request: Request, email: str = Form(...)):
+    """Process forgot password form."""
+    ip_address = _get_client_ip(request)
+
+    # In production, password reset is disabled without configured mail provider
+    if _SME_EW_ENV == "production":
+        _log_auth_event(
+            TENANT_DEFAULT,
+            "password_reset_blocked_production",
+            details={"email": email, "reason": "disabled_in_production"},
+            ip_address=ip_address,
+        )
+        return RedirectResponse(url="/forgot-password", status_code=302)
+
+    # Rate limit (dev mode only)
+    rate_key = f"forgot:{ip_address}"
+    if not _rate_limit_allow(rate_key, 5, 300):  # 5 attempts per 5 minutes
+        return RedirectResponse(url="/forgot-password?sent=1", status_code=302)
+
+    # Always respond with same message (no user enumeration)
+    user = _get_user_by_email(email.lower().strip())
+
+    if user and user.get("is_active"):
+        # Create token
+        token = _create_reset_token(user["id"])
+
+        # Build reset link
+        host = request.headers.get("host", "localhost:8000")
+        scheme = "http"  # Dev mode only
+        reset_link = f"{scheme}://{host}/reset-password/{token}"
+
+        # Dev mode: log to console and outbox
+        _dev_mail_outbox_add(
+            recipient=user["email"],
+            subject="Password Reset Request",
+            body=f"Click the link to reset your password: {reset_link}",
+            link=reset_link,
+        )
+
+        _log_auth_event(user["tenant_id"], "password_reset_requested", user_id=user["id"], ip_address=ip_address)
+    else:
+        _log_auth_event(TENANT_DEFAULT, "password_reset_no_user", details={"email": email}, ip_address=ip_address)
+
+    # Always redirect with sent=1 (no user enumeration)
+    return RedirectResponse(url="/forgot-password?sent=1", status_code=302)
+
+@app.get("/reset-password/{token}", response_class=HTMLResponse)
+async def reset_password_page(request: Request, token: str, error: Optional[str] = Query(None)):
+    """Display reset password form."""
+    # Validate token exists and is valid
+    user_id = _validate_reset_token(token)
+    if not user_id:
+        return _render_or_fallback(
+            request,
+            "error.html",
+            {
+                "request": request,
+                "title": "Invalid Link",
+                "error_title": "Invalid or Expired Link",
+                "error_message": "This password reset link is invalid or has expired. Please request a new one.",
+                "actions": [{"label": "Request New Link", "href": "/forgot-password"}],
+            },
+            fallback_title="Invalid Link",
+            fallback_html="<p>Invalid or expired link. <a href='/forgot-password'>Request a new one</a>.</p>",
+        )
+
+    return _render_or_fallback(
+        request,
+        "reset_password.html",
+        {
+            "request": request,
+            "title": "Reset Password",
+            "token": token,
+            "error": error,
+        },
+        fallback_title="Reset Password",
+        fallback_html=f"""
+        <form method="post" action="/reset-password/{token}" style="max-width:400px;">
+            <div style="margin-bottom:16px;">
+                <label>New Password (min {PASSWORD_MIN_LENGTH} characters)</label><br>
+                <input type="password" name="password" required minlength="{PASSWORD_MIN_LENGTH}" style="width:100%; padding:8px;">
+            </div>
+            <div style="margin-bottom:16px;">
+                <label>Confirm Password</label><br>
+                <input type="password" name="confirm_password" required style="width:100%; padding:8px;">
+            </div>
+            <button type="submit" style="padding:10px 20px;">Reset Password</button>
+        </form>
+        """,
+    )
+
+@app.post("/reset-password/{token}")
+async def reset_password_submit(
+    request: Request,
+    token: str,
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    """Process password reset."""
+    ip_address = _get_client_ip(request)
+
+    # Validate token
+    user_id = _validate_reset_token(token)
+    if not user_id:
+        return RedirectResponse(url=f"/reset-password/{token}?error=invalid_token", status_code=302)
+
+    # Validate passwords match
+    if password != confirm_password:
+        return RedirectResponse(url=f"/reset-password/{token}?error=mismatch", status_code=302)
+
+    # Validate password policy
+    valid, error_msg = _validate_password(password)
+    if not valid:
+        return RedirectResponse(url=f"/reset-password/{token}?error=policy", status_code=302)
+
+    # Get user
+    user = _get_user_by_id(user_id)
+    if not user:
+        return RedirectResponse(url=f"/reset-password/{token}?error=invalid_token", status_code=302)
+
+    # Update password
+    password_hash = generate_password_hash(password)
+    with db_conn() as conn:
+        conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+        conn.commit()
+
+    # Consume token
+    _consume_reset_token(token)
+
+    _log_auth_event(user["tenant_id"], "password_reset_completed", user_id=user_id, ip_address=ip_address)
+
+    return RedirectResponse(url="/login?reset=1", status_code=302)
+
+
+# ----------------------------
+# Step-Up Authentication Routes (Phase 5)
+# ----------------------------
+@app.get("/stepup", response_class=HTMLResponse)
+async def stepup_page(request: Request, next: Optional[str] = Query("/dashboard"), error: Optional[str] = Query(None)):
+    """Display step-up authentication form."""
+    if not _is_authenticated(request):
+        return RedirectResponse(url="/login", status_code=302)
+
+    return _render_or_fallback(
+        request,
+        "stepup.html",
+        {
+            "request": request,
+            "title": "Confirm Identity",
+            "next": next,
+            "error": error,
+            "user_email": _actor_id(request),
+        },
+        fallback_title="Confirm Identity",
+        fallback_html=f"""
+        <p>Please re-enter your password to continue.</p>
+        <form method="post" action="/stepup" style="max-width:400px;">
+            <input type="hidden" name="next" value="{next}">
+            <div style="margin-bottom:16px;">
+                <label>Password</label><br>
+                <input type="password" name="password" required style="width:100%; padding:8px;">
+            </div>
+            <button type="submit" style="padding:10px 20px;">Confirm</button>
+        </form>
+        """,
+    )
+
+@app.post("/stepup")
+async def stepup_submit(
+    request: Request,
+    password: str = Form(...),
+    next: str = Form("/dashboard"),
+    csrf_token: Optional[str] = Form(None),
+):
+    """Process step-up authentication."""
+    _require_csrf(request, csrf_token)
+    if not _is_authenticated(request):
+        return RedirectResponse(url="/login", status_code=302)
+
+    ip_address = _get_client_ip(request)
+    user_id = _current_user_id(request)
+    tenant_id = _tenant_id(request)
+
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    # Get user with password hash
+    email = _actor_id(request)
+    user = _get_user_by_email(email)
+
+    if not user or not check_password_hash(user.get("password_hash", ""), password):
+        _log_auth_event(tenant_id, "stepup_failed", user_id=user_id, ip_address=ip_address)
+        # Sanitize next URL
+        safe_next = next if next.startswith("/") else "/dashboard"
+        return RedirectResponse(url=f"/stepup?next={safe_next}&error=invalid", status_code=302)
+
+    # Set step-up verification
+    _set_stepup(request)
+    _log_auth_event(tenant_id, "stepup_success", user_id=user_id, ip_address=ip_address)
+
+    # Sanitize next URL
+    safe_next = next if next.startswith("/") else "/dashboard"
+    return RedirectResponse(url=safe_next, status_code=302)
+
+
+# ----------------------------
+# User Management Routes (Phase 3 - Admin only)
+# ----------------------------
+@app.get("/admin/users", response_class=HTMLResponse)
+async def admin_users_page(request: Request):
+    """List users (admin only)."""
+    _require_role(request, "admin", "view", "admin_users")
+    tenant_id = _tenant_id(request)
+
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, tenant_id, email, role, is_active, created_at, last_login_at FROM users WHERE tenant_id = ? ORDER BY created_at DESC",
+            (tenant_id,),
+        ).fetchall()
+
+    users = [
+        {
+            "id": int(r["id"]),
+            "email": str(r["email"]),
+            "role": str(r["role"]),
+            "is_active": bool(r["is_active"]),
+            "created_at": str(r["created_at"]),
+            "last_login_at": str(r["last_login_at"]) if r["last_login_at"] else None,
+        }
+        for r in rows
+    ]
+
+    active_run, latest_run = _active_and_latest(request)
+    return _render_or_fallback(
+        request,
+        "admin_users.html",
+        {
+            "request": request,
+            "title": "User Management",
+            "users": users,
+            "roles": AUTH_ROLES,
+            "active_run_id": active_run.get("id") if active_run else None,
+            "latest_run_id": latest_run.get("id") if latest_run else None,
+            "run_qs": _run_qs(active_run, latest_run),
+        },
+        fallback_title="User Management",
+        fallback_html="<p>User management requires admin_users.html template.</p>",
+    )
+
+@app.post("/admin/users/create")
+async def admin_create_user(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    role: str = Form("viewer"),
+    csrf_token: Optional[str] = Form(None),
+):
+    """Create new user (admin only, requires step-up)."""
+    _require_csrf(request, csrf_token)
+    _require_role(request, "admin", "create", "user")
+
+    if not _require_stepup(request):
+        return RedirectResponse(url="/stepup?next=/admin/users", status_code=302)
+
+    tenant_id = _tenant_id(request)
+    ip_address = _get_client_ip(request)
+    actor_id = _actor_id(request)
+    current_user_id = _current_user_id(request)
+
+    # Validate
+    valid, error_msg = _validate_password(password)
+    if not valid:
+        raise HTTPException(status_code=400, detail=error_msg)
+
+    if role not in AUTH_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    # Check email not already used
+    existing = _get_user_by_email(email.lower().strip(), tenant_id)
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already in use")
+
+    # Create user
+    password_hash = generate_password_hash(password)
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT INTO users (tenant_id, email, password_hash, role, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+            (tenant_id, email.lower().strip(), password_hash, role, datetime.utcnow().isoformat()),
+        )
+        new_user_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        conn.commit()
+
+    _log_auth_event(
+        tenant_id, "user_created",
+        user_id=current_user_id,
+        actor_id=actor_id,
+        target_user_id=new_user_id,
+        details={"email": email, "role": role},
+        ip_address=ip_address,
+    )
+
+    return RedirectResponse(url="/admin/users", status_code=302)
+
+@app.post("/admin/users/{user_id}/update")
+async def admin_update_user(
+    request: Request,
+    user_id: int,
+    role: str = Form(...),
+    is_active: bool = Form(True),
+    csrf_token: Optional[str] = Form(None),
+):
+    """Update user role/status (admin only, requires step-up)."""
+    _require_csrf(request, csrf_token)
+    _require_role(request, "admin", "update", "user")
+
+    if not _require_stepup(request):
+        return RedirectResponse(url=f"/stepup?next=/admin/users", status_code=302)
+
+    tenant_id = _tenant_id(request)
+    ip_address = _get_client_ip(request)
+    actor_id = _actor_id(request)
+    current_user_id = _current_user_id(request)
+
+    if role not in AUTH_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    # Verify user belongs to tenant
+    target_user = _get_user_by_id(user_id)
+    if not target_user or target_user["tenant_id"] != tenant_id:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Prevent self-demotion from admin
+    if user_id == current_user_id and role != "admin":
+        raise HTTPException(status_code=400, detail="Cannot demote yourself")
+
+    # Update
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE users SET role = ?, is_active = ? WHERE id = ? AND tenant_id = ?",
+            (role, 1 if is_active else 0, user_id, tenant_id),
+        )
+        conn.commit()
+
+    _log_auth_event(
+        tenant_id, "user_updated",
+        user_id=current_user_id,
+        actor_id=actor_id,
+        target_user_id=user_id,
+        details={"role": role, "is_active": is_active},
+        ip_address=ip_address,
+    )
+
+    return RedirectResponse(url="/admin/users", status_code=302)
+
+
+# ----------------------------
 # Routes
 # ----------------------------
 @app.get("/", response_class=RedirectResponse)
@@ -3526,7 +4904,8 @@ def upload_page(request: Request, run_id: Optional[int] = Query(None)):
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, run_id: Optional[int] = Query(None)):
-    _require_role(request, "admin", "view", "settings")
+    # manager role can view settings (Phase 3 RBAC)
+    _require_role(request, "manager", "view", "settings")
     active_run, latest_run_actual = _active_and_latest(request, run_id)
     tenant_id = _tenant_id(request)
     s = read_settings(tenant_id)
@@ -3551,6 +4930,8 @@ def settings_page(request: Request, run_id: Optional[int] = Query(None)):
         "view",
         f"settings_scope:{settings_scope}:{settings_hash}",
     )
+    # Check for success message after save
+    saved = request.query_params.get("saved") == "1"
     return _render_or_fallback(
         request,
         "settings.html",
@@ -3565,6 +4946,10 @@ def settings_page(request: Request, run_id: Optional[int] = Query(None)):
             "latest_run_id": (latest_run_actual.get("id") if latest_run_actual else None),
             "run_qs": _run_qs(active_run, latest_run_actual),
             "run_scope": run_scope,
+            "access_role": _access_role(request),
+            "access_actor": _actor_id(request),
+            "access_tenant": tenant_id,
+            "saved": saved,
         },
         fallback_title="Settings",
         fallback_html=(
@@ -3593,41 +4978,63 @@ def settings_save(
     recent_compare_days: int = Form(30),
     demo_mode: Any = Form(True),
     enable_integrations_scaffold: Any = Form(True),
+    csrf_token: Optional[str] = Form(None),
 ):
+    _require_csrf(request, csrf_token)
     _require_role(request, "admin", "update", "settings")
+    tenant_id = _tenant_id(request)
+
+    # Read current settings to preserve fields not in form
+    current = read_settings(tenant_id)
+
+    # Build updated settings with validated/clamped values
+    updated = {
+        "config_version": current.get("config_version", CONFIG_VERSION),
+        "currency": str(currency).upper()[:3] if currency else "AUD",
+        "starting_cash": _clamp_float(starting_cash, 0, 1e12, 25000),
+        "window_days": _clamp_int(window_days, 7, 365, 90),
+        "burn_days": _clamp_int(burn_days, 7, 180, 30),
+        "low_cash_buffer_days": _clamp_int(low_cash_buffer_days, 1, 90, 21),
+        "expense_spike_pct": _clamp_float(expense_spike_pct, 0.01, 1.0, 0.35),
+        "revenue_drop_pct": _clamp_float(revenue_drop_pct, 0.01, 1.0, 0.25),
+        "concentration_threshold": _clamp_float(concentration_threshold, 0.1, 1.0, 0.45),
+        "large_txn_sigma": _clamp_float(large_txn_sigma, 1.0, 10.0, 3.0),
+        "recurring_min_hits": _clamp_int(recurring_min_hits, 2, 12, 3),
+        "overdue_days": _clamp_int(overdue_days, 1, 90, 7),
+        "recent_compare_days": _clamp_int(recent_compare_days, 7, 180, 30),
+        "demo_mode": _parse_bool(demo_mode, default=True),
+        "enable_integrations_scaffold": _parse_bool(enable_integrations_scaffold, default=True),
+        # Preserve webhook_secret and other security-sensitive fields from current settings
+        "webhook_secret": current.get("webhook_secret", "CHANGE_ME_DEMO_SECRET"),
+        "enable_categorisation_rules": current.get("enable_categorisation_rules", True),
+        "enable_regex_rules": current.get("enable_regex_rules", False),
+    }
+
+    # Save to tenant_settings
+    write_tenant_settings(tenant_id, updated)
+
+    # Audit log
+    _log_access(
+        tenant_id,
+        _actor_id(request),
+        _access_role(request),
+        "update",
+        f"settings:{_canonical_json_hash(updated)}",
+    )
+
+    logger.info("Settings updated by %s for tenant %s", _actor_id(request), tenant_id)
+
     accept = str(request.headers.get("accept") or "").lower()
-    if "text/html" in accept:
-        try:
-            return templates.TemplateResponse(
-                "error.html",
-                {
-                    "request": request,
-                    "title": "Settings are read-only",
-                    "error_title": "Settings are read-only",
-                    "error_message": "Settings updates are disabled in this read-only environment.",
-                    "schema_help": None,
-                    "actions": [
-                        {"label": "Back to Settings", "href": "/settings"},
-                        {"label": "Home", "href": "/dashboard"},
-                    ],
-                    "show_details": False,
-                    "error_details": None,
-                    "access_role": _access_role(request),
-                    "access_actor": _actor_id(request),
-                    "access_tenant": _tenant_id(request),
-                },
-                status_code=403,
-            )
-        except TemplateNotFound:
-            return HTMLResponse("Settings updates are disabled.", status_code=403)
-        except Exception:
-            return HTMLResponse("Settings updates are disabled.", status_code=403)
-    return JSONResponse({"detail": "settings_updates_disabled"}, status_code=403)
+    if "application/json" in accept:
+        return JSONResponse({"status": "ok", "settings_hash": _canonical_json_hash(updated)})
+    return RedirectResponse(url="/settings?saved=1", status_code=303)
 
 
 @app.post("/analyze")
-async def analyze(request: Request, file: UploadFile = File(...)):
-    _require_role(request, "admin", "create", "run:analyze")
+async def analyze(request: Request, file: UploadFile = File(...), csrf_token: Optional[str] = Form(None)):
+    _require_csrf(request, csrf_token)
+    # operator role can upload CSV (Phase 3 RBAC)
+    _require_role(request, "operator", "create", "run:analyze")
     tenant_id = _tenant_id(request)
     if not _rate_limit_allow(f"{tenant_id}:upload", RATE_LIMIT_UPLOADS, RATE_LIMIT_WINDOW_S):
         return _render_or_fallback(
@@ -4107,8 +5514,11 @@ def update_alert_status(
     alert_id: str,
     status: str = Form(...),
     note: str = Form(""),
+    csrf_token: Optional[str] = Form(None),
 ):
-    _require_role(request, "admin", "update", f"alert:{alert_id}")
+    _require_csrf(request, csrf_token)
+    # operator role can update alert status/note (Phase 3 RBAC)
+    _require_role(request, "operator", "update", f"alert:{alert_id}")
     status = str(status).strip().lower()
     if status not in {"noted", "actioned", "ignore", "snoozed", "review"}:
         status = "review"
@@ -4150,7 +5560,13 @@ def update_alert_status(
 
 
 @app.get("/alerts/{alert_id}", response_class=HTMLResponse)
-def alert_detail(request: Request, alert_id: str, readonly: bool = Query(False), run_id: Optional[int] = Query(None)):
+def alert_detail(
+    request: Request,
+    alert_id: str,
+    readonly: bool = Query(False),
+    run_id: Optional[int] = Query(None),
+    events_page: int = Query(1, ge=1)
+):
     active_run, latest_run_actual = _active_and_latest(request, run_id)
     run_qs = _run_qs(active_run, latest_run_actual)
     run_scope = _run_scope_context(active_run, latest_run_actual)
@@ -4166,6 +5582,10 @@ def alert_detail(request: Request, alert_id: str, readonly: bool = Query(False),
             is_latest = False
     can_update = bool(is_latest and not bool(readonly))
 
+    # Pagination for alert events
+    events_per_page = 50
+    events_offset = (events_page - 1) * events_per_page
+
     with db_conn() as conn:
         state = conn.execute(
             """
@@ -4178,18 +5598,31 @@ def alert_detail(request: Request, alert_id: str, readonly: bool = Query(False),
 
         if _role_rank(role) >= _role_rank("auditor"):
             _log_access(tenant_id, _actor_id(request), role, "view", f"audit:alert:{alert_id}")
+
+            # Get total count for pagination
+            total_events = conn.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM alert_events
+                WHERE alert_id = ?
+                """,
+                (alert_key,),
+            ).fetchone()["count"]
+
+            # Get paginated events
             events = conn.execute(
                 """
                 SELECT created_at, run_id, event_type, status, note
                 FROM alert_events
                 WHERE alert_id = ?
                 ORDER BY created_at DESC
-                LIMIT 500
+                LIMIT ? OFFSET ?
                 """,
-                (alert_key,),
+                (alert_key, events_per_page, events_offset),
             ).fetchall()
         else:
             events = []
+            total_events = 0
 
         recent_runs = []
 
@@ -4219,6 +5652,11 @@ def alert_detail(request: Request, alert_id: str, readonly: bool = Query(False),
                 alert_details = a
                 break
 
+    # Calculate pagination metadata
+    total_pages = (total_events + events_per_page - 1) // events_per_page if total_events > 0 else 1
+    has_prev_page = events_page > 1
+    has_next_page = events_page < total_pages
+
     return _render_or_fallback(
         request,
         "alert_detail.html",
@@ -4244,6 +5682,12 @@ def alert_detail(request: Request, alert_id: str, readonly: bool = Query(False),
             "latest_run_id": (latest_run_actual.get("id") if latest_run_actual else None),
             "run_qs": run_qs,
             "run_scope": run_scope,
+            "events_page": events_page,
+            "events_per_page": events_per_page,
+            "total_events": total_events,
+            "total_pages": total_pages,
+            "has_prev_page": has_prev_page,
+            "has_next_page": has_next_page,
         },
         fallback_title=f"Alert: {alert_id}",
         fallback_html="<p>Alert detail template missing. Use <code>/api/alerts/state</code> and <code>/api/alerts/events</code>.</p>",
@@ -4489,8 +5933,11 @@ def save_feedback(
     alert_id: str = Form(...),
     status: str = Form(...),
     note: str = Form(""),
+    csrf_token: Optional[str] = Form(None),
 ):
-    _require_role(request, "admin", "update", f"run:{run_id}:feedback")
+    _require_csrf(request, csrf_token)
+    # operator role can update alert status/note (Phase 3 RBAC)
+    _require_role(request, "operator", "update", f"run:{run_id}:feedback")
     status = str(status).strip().lower()
     if status not in {"noted", "actioned", "ignore", "snoozed", "review"}:
         status = "review"
@@ -4661,14 +6108,37 @@ def api_report_export_csv(request: Request, run_id: int):
     writer = csv.writer(out)
     writer.writerow(["record_type", "key", "severity_or_title", "title_or_value", "suppressed", "suppression_reason"])
     for r in rows:
-        writer.writerow([str(x).replace("\n", " ").replace("\r", " ") for x in r])
+        # Apply CSV formula injection protection to all cells
+        writer.writerow([_safe_csv_cell(x) for x in r])
     return PlainTextResponse(out.getvalue(), media_type="text/csv")
 
 
-@app.get("/api/report/{run_id}/export.pdf", response_class=PlainTextResponse)
+@app.get("/api/report/{run_id}/export.pdf")
 def api_report_export_pdf(request: Request, run_id: int):
     _require_role(request, "auditor", "export", f"report:{run_id}:pdf")
-    return PlainTextResponse("PDF export scaffold not yet implemented.", status_code=501)
+    # PDF export is not available in the current version
+    accept = str(request.headers.get("accept") or "").lower()
+    if "text/html" in accept:
+        return _render_or_fallback(
+            request,
+            "error.html",
+            {
+                "request": request,
+                "title": "Feature Not Available",
+                "error_title": "PDF Export Not Available",
+                "error_message": "PDF export is not available in the current version. Please use CSV export for data extraction.",
+                "schema_help": None,
+                "actions": [
+                    {"label": "Export CSV", "href": f"/api/report/{run_id}/export.csv"},
+                    {"label": "Back to Dashboard", "href": "/dashboard"},
+                ],
+                "show_details": False,
+                "error_details": None,
+            },
+            fallback_title="Feature Not Available",
+            fallback_html=f'<p>PDF export is not available. <a href="/api/report/{run_id}/export.csv">Export CSV instead</a>.</p>',
+        )
+    return JSONResponse({"error": "PDF export not available", "alternative": f"/api/report/{run_id}/export.csv"}, status_code=501)
 
 def _bundle_hash(payload: Dict[str, Any]) -> str:
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -5360,8 +6830,8 @@ def _generate_synthetic_transactions(seed: int = 42, days: int = 120, rows_per_d
     start = end - pd.Timedelta(days=days - 1)
     dates = pd.date_range(start, end, freq="D")
 
-    vendors_exp = ["Officeworks", "Woolworths", "Telstra", "AWS", "Uber", "Bunnings", "Xero", "Google Ads", "Meta Ads"]
-    vendors_inc = ["Client A", "Client B", "Shopify Payout", "Stripe Payout", "Square Payout"]
+    vendors_exp = ["Vendor A", "Vendor B", "Vendor C", "Cloud Provider X", "Vendor D", "Supplier E", "Software Co", "Ad Platform 1", "Ad Platform 2"]
+    vendors_inc = ["Client A", "Client B", "Client C", "Payment Processor 1", "Payment Processor 2"]
     cats_exp = ["Rent", "Utilities", "Software", "Marketing", "Supplies", "Travel", "Contractors"]
     cats_inc = ["Sales"]
 
@@ -5402,15 +6872,15 @@ def dev_generate_and_ingest(
     days: int = Form(120),
     rows_per_day: int = Form(8),
 ):
-    _require_role(request, "admin", "create", "run:dev_generate")
     """
     Dev-only helper (demo-safe):
     -Generates synthetic transactions (cheap + legal)
     -Ingests them using the SAME pipeline as /api/ingest/simulate
-    -Returns the new run_id"""
+    -Returns the new run_id
+    """
+    _require_dev_mode(request)  # Hard production gate
+    _require_role(request, "admin", "create", "run:dev_generate")
     s = read_settings(_tenant_id(request))
-    if not bool(_parse_bool(s.get("demo_mode", True), default=True)):
-        raise HTTPException(status_code=403, detail="Dev helpers disabled outside demo_mode")
     tenant_id = _tenant_id(request)
 
     df = _generate_synthetic_transactions(seed=seed, days=days, rows_per_day=rows_per_day)
@@ -5467,8 +6937,9 @@ def dev_generate_and_ingest(
 
 @app.get("/dev/generate-sample", response_class=PlainTextResponse)
 def dev_generate_sample(request: Request, seed: int = 42, days: int = 120, rows_per_day: int = 8):
-    _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "dev_generate_sample")
     """Download a demo CSV (cheap + legal)."""
+    _require_dev_mode(request)  # Hard production gate
+    _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "dev_generate_sample")
     df = _generate_synthetic_transactions(seed=seed, days=days, rows_per_day=rows_per_day)
     csv = df.to_csv(index=False)
     return PlainTextResponse(csv, media_type="text/csv")
@@ -5476,13 +6947,11 @@ def dev_generate_sample(request: Request, seed: int = 42, days: int = 120, rows_
 
 @app.post("/api/ingest/local", response_class=JSONResponse)
 def api_ingest_local(request: Request, path: str = Form(...), provider: str = Form("local_drop")):
-    _require_role(request, "admin", "create", f"run:ingest_local:{provider}")
     """Ingest a CSV from demo_data/ only (safe path)."""
+    _require_dev_mode(request)  # Hard production gate
+    _require_role(request, "admin", "create", f"run:ingest_local:{provider}")
     tenant_id = _tenant_id(request)
     s = read_settings(tenant_id)
-    demo_mode = bool(_parse_bool(s.get("demo_mode", True), default=True))
-    if not demo_mode:
-        return JSONResponse({"error": "local ingest disabled outside demo_mode"}, status_code=403)
 
     rel = _safe_text(path, 200).strip().lstrip("/").lstrip("\\")
     if not rel:
@@ -5561,6 +7030,8 @@ def api_ingest_simulate(
     rows_per_day: int = Form(8),
     provider: str = Form("synthetic"),
 ):
+    """Generate synthetic data and ingest as a run (cheap + legal)."""
+    _require_dev_mode(request)  # Hard production gate
     _require_role(request, "admin", "create", f"run:ingest_simulate:{provider}")
     """Generate synthetic data and ingest as a run (cheap + legal)."""
     tenant_id = _tenant_id(request)

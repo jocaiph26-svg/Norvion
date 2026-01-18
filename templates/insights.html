@@ -8,7 +8,7 @@
         <div class="row" style="align-items:center; gap:10px; margin-top:8px;">
           <span class="badge">Run {{ latest_run.id }}</span>
           {% if run_scope and not run_scope.is_latest %}
-            <span class="badge">Historical (snapshot)</span>
+            <span class="badge">Stored run (read-only)</span>
           {% else %}
             <span class="badge">Latest</span>
           {% endif %}
@@ -116,16 +116,22 @@
 
     <div class="grid cols-3">
       <div class="card kpi">
-        <div class="label">Modeled cash position</div>
+        <div class="label">Calculated cash position</div>
         <div class="value">
           {% if s.current_cash is not none %}
             {{ s.current_cash|money(s.currency) }}
           {% endif %}
         </div>
-        <div class="hint">{% if s.current_cash is not none %}Computed from starting cash + cumulative net change.{% endif %}</div>
+        <div class="hint">
+          {% if s.current_cash is not none %}
+            Computed from starting cash + cumulative net change.
+          {% else %}
+            Not available for this run.
+          {% endif %}
+        </div>
       </div>
       <div class="card kpi">
-        <div class="label">Modeled runway (static burn)</div>
+        <div class="label">Calculated runway (static burn)</div>
         <div class="value">
           {% if s.runway_days is not none and s.runway_days <= 0 %}
             ≤0 days
@@ -133,7 +139,13 @@
             {{ '%.0f'|format(s.runway_days) }} days
           {% endif %}
         </div>
-        <div class="hint">{% if s.runway_days is not none %}Extrapolated from current cash ÷ burn rate. Assumes no revenue or expense changes.{% endif %}</div>
+        <div class="hint">
+          {% if s.runway_days is not none %}
+            Computed from current cash ÷ burn rate (static). Does not account for future changes.
+          {% else %}
+            Not available for this run.
+          {% endif %}
+        </div>
       </div>
       <div class="card kpi">
         <div class="label">Window net change</div>
@@ -142,7 +154,13 @@
             {{ s.window_net_change|money(s.currency) }}
           {% endif %}
         </div>
-        <div class="hint">{% if s.window_net_change is not none %}Stored window total.{% endif %}</div>
+        <div class="hint">
+          {% if s.window_net_change is not none %}
+            Stored window total.
+          {% else %}
+            Not available for this run.
+          {% endif %}
+        </div>
       </div>
     </div>
 
@@ -151,6 +169,7 @@
     <div class="card">
       <div class="card-b">
         <h2>Data completeness (system-derived, non-certifying)</h2>
+        <p class="sub" style="margin-top:6px;">Indicator only — does not certify accuracy or completeness of uploaded data. Bands are derived from score thresholds: Good (≥80), Moderate (≥50), Poor (&lt;50).</p>
         <div class="row" style="margin-top:8px;">
           {% if quality.band %}
             <div class="pill">Completeness band: <strong>{{ quality.band }}</strong></div>

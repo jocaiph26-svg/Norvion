@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ title or "SME Early-Warning" }}</title>
+  <title>{{ title or "Norvion" }}</title>
 
   <!-- Icons -->
   <link rel="icon" href="/static/favicon.ico">
@@ -24,8 +24,8 @@
   <div class="app-shell">
     <aside class="sidebar">
       <div class="sidebar-brand">
-        <div>SME Early-Warning</div>
-        <small>Audit-first monitoring</small>
+        <div>Norvion</div>
+        <small>Snapshot review</small>
         {% if access_role is defined %}
           <details class="access-context">
             <summary>Access context</summary>
@@ -64,19 +64,39 @@
            class="{{ 'active' if path.startswith('/history') else '' }}">
           History
         </a>
+        {% if access_role in ['manager', 'admin'] %}
         <a href="/settings{{ rq }}"
            class="{{ 'active' if path.startswith('/settings') else '' }}">
           Settings
         </a>
+        {% endif %}
         <a href="/integrations{{ rq }}"
            class="{{ 'active' if path.startswith('/integrations') else '' }}">
           Integrations
         </a>
         <a href="/digest/weekly{{ rq }}"
-           class="{{ 'active' if path.startswith('/insights/weekly') else '' }}">
+           class="{{ 'active' if path.startswith('/digest/weekly') else '' }}">
           Weekly Summary
         </a>
+        {% if access_role == 'admin' %}
+        <a href="/admin/users{{ rq }}"
+           class="{{ 'active' if path.startswith('/admin/users') else '' }}">
+          Users
+        </a>
+        {% endif %}
       </nav>
+
+      {% if access_actor %}
+      <div class="sidebar-footer" style="padding: 16px 20px; border-top: 1px solid var(--border); margin-top: auto;">
+        <div style="font-size: 13px; color: var(--muted); margin-bottom: 8px;">
+          <span class="mono" style="font-size: 12px;">{{ access_actor }}</span>
+        </div>
+        <form method="post" action="/logout" style="margin: 0;">
+          {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+          <button type="submit" class="btn btn-ghost" style="width: 100%; font-size: 13px;">Log out</button>
+        </form>
+      </div>
+      {% endif %}
 
     </aside>
 
@@ -87,7 +107,7 @@
             &nbsp;
           </div>
           <div class="topbar-actions">
-            <a class="btn btn-primary" href="/upload">Upload CSV</a>
+            <a class="btn" href="/upload">Upload CSV</a>
           </div>
         </div>
       </header>
@@ -99,13 +119,16 @@
           <div class="hr"></div>
           <div>
             <strong>Disclaimer:</strong>
-            Software-generated summaries from uploaded data (stored at run time).
+            Summaries computed from uploaded data using deterministic rules (stored at run time).
             Not financial advice. Verify with a qualified professional.
           </div>
           <div>
             Design goal:
             <strong>deterministic checks + stored evidence + audit trail</strong>
             (no black-box claims).
+          </div>
+          <div style="margin-top:8px;">
+            <a href="/tos" style="color:var(--muted); text-decoration:none; font-size:13px;">Terms of Service</a>
           </div>
         </div>
       </main>

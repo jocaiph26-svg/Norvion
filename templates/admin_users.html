@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="header">
+    <div>
+      <h1 class="h1">User Management</h1>
+      <p class="sub">Manage users for this tenant. Admin-only.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Create User</h2>
+      <p class="sub" style="margin-top:6px;">Add a new user to this tenant. Requires step-up verification.</p>
+      <div class="hr"></div>
+
+      <form method="post" action="/admin/users/create" style="max-width:500px;">
+        <div class="field" style="margin-bottom:16px;">
+          <label style="font-weight:700; margin-bottom:6px; display:block;">Email</label>
+          <input type="email" name="email" required style="width:100%; padding:10px; border:1px solid var(--border); border-radius:var(--radius-sm);">
+        </div>
+        <div class="field" style="margin-bottom:16px;">
+          <label style="font-weight:700; margin-bottom:6px; display:block;">Password (min 12 characters)</label>
+          <input type="password" name="password" required minlength="12" style="width:100%; padding:10px; border:1px solid var(--border); border-radius:var(--radius-sm);">
+        </div>
+        <div class="field" style="margin-bottom:16px;">
+          <label style="font-weight:700; margin-bottom:6px; display:block;">Role</label>
+          <select name="role" style="width:100%; padding:10px; border:1px solid var(--border); border-radius:var(--radius-sm);">
+            {% for r in roles %}
+              <option value="{{ r }}">{{ r|title }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button type="submit" class="btn btn-primary">Create User</button>
+      </form>
+    </div>
+  </div>
+
+  <div style="height:16px;"></div>
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Users</h2>
+      <p class="sub" style="margin-top:6px;">{{ users|length }} user(s) in this tenant.</p>
+      <div class="hr"></div>
+
+      {% if users|length == 0 %}
+        <div class="callout">No users found.</div>
+      {% else %}
+        <table style="width:100%; border-collapse:collapse;">
+          <thead>
+            <tr>
+              <th style="text-align:left; border-bottom:1px solid var(--border); padding:10px 0; font-weight:800;">Email</th>
+              <th style="text-align:left; border-bottom:1px solid var(--border); padding:10px 0; font-weight:800;">Role</th>
+              <th style="text-align:left; border-bottom:1px solid var(--border); padding:10px 0; font-weight:800;">Status</th>
+              <th style="text-align:left; border-bottom:1px solid var(--border); padding:10px 0; font-weight:800;">Last Login</th>
+              <th style="text-align:left; border-bottom:1px solid var(--border); padding:10px 0; font-weight:800;">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for u in users %}
+              <tr>
+                <td style="padding:12px 0; border-bottom:1px solid var(--border);">
+                  <span class="mono">{{ u.email }}</span>
+                </td>
+                <td style="padding:12px 0; border-bottom:1px solid var(--border);">
+                  <span class="pill">{{ u.role|title }}</span>
+                </td>
+                <td style="padding:12px 0; border-bottom:1px solid var(--border);">
+                  {% if u.is_active %}
+                    <span class="pill" style="background:#dcfce7; color:#166534;">Active</span>
+                  {% else %}
+                    <span class="pill" style="background:#fef2f2; color:#991b1b;">Inactive</span>
+                  {% endif %}
+                </td>
+                <td style="padding:12px 0; border-bottom:1px solid var(--border);">
+                  {% if u.last_login_at %}
+                    {{ u.last_login_at|humandt }}
+                  {% else %}
+                    <span style="color:var(--muted);">Never</span>
+                  {% endif %}
+                </td>
+                <td style="padding:12px 0; border-bottom:1px solid var(--border);">
+                  <details style="display:inline-block;">
+                    <summary style="cursor:pointer; font-weight:700; font-size:13px; color:var(--info);">Edit</summary>
+                    <div style="margin-top:12px; padding:16px; background:var(--bg); border-radius:var(--radius-sm);">
+                      <form method="post" action="/admin/users/{{ u.id }}/update">
+                        <div class="field" style="margin-bottom:12px;">
+                          <label style="font-weight:700; margin-bottom:6px; display:block; font-size:13px;">Role</label>
+                          <select name="role" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:var(--radius-sm);">
+                            {% for r in roles %}
+                              <option value="{{ r }}" {{ 'selected' if u.role == r else '' }}>{{ r|title }}</option>
+                            {% endfor %}
+                          </select>
+                        </div>
+                        <div class="field" style="margin-bottom:12px;">
+                          <label style="display:flex; align-items:center; gap:8px; font-size:13px;">
+                            <input type="checkbox" name="is_active" value="true" {{ 'checked' if u.is_active else '' }}>
+                            Active
+                          </label>
+                        </div>
+                        <button type="submit" class="btn" style="font-size:13px;">Update</button>
+                      </form>
+                    </div>
+                  </details>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="height:16px;"></div>
+
+  <div class="callout">
+    <strong>Role Permissions:</strong>
+    <ul style="margin:8px 0 0 18px; padding:0;">
+      <li><strong>Viewer:</strong> Read-only access to runs, alerts, and history</li>
+      <li><strong>Operator:</strong> Can upload CSV and update alert status/notes</li>
+      <li><strong>Manager:</strong> Can view settings and configuration</li>
+      <li><strong>Admin:</strong> Full access including user management and settings changes</li>
+    </ul>
+  </div>
+{% endblock %}

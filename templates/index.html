@@ -37,6 +37,7 @@
   <div class="card">
     <div class="card-b">
       <form action="/analyze" method="post" enctype="multipart/form-data">
+        {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
         <div class="field">
           <label>CSV file</label>
           <input class="input" type="file" name="file" accept=".csv" required>

@@ -3,9 +3,15 @@
    ========================= */
 
 :root {
-  --bg: #f6f7f9;
+  /* ============================================================
+     BACKGROUND TEST (2026-01-18)
+     Original: --bg: #f6f7f9;
+     Test:     --bg: #eceef2; (slightly darker, neutral slate)
+     To revert: change --bg back to #f6f7f9
+     ============================================================ */
+  --bg: #eceef2;
   --card: #ffffff;
-  --border: #e4e7eb;
+  --border: #dfe2e7;
   --text: #1c1e21;
   --muted: #5f6368;
   --meta: #8a9099;
@@ -100,6 +106,23 @@ small { color: var(--meta); }
   padding: 18px 16px;
   overflow-y: auto;
   color: #dadde2;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.sidebar-footer .btn-ghost {
+  color: #dadde2;
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.sidebar-footer .btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .sidebar-brand {
@@ -648,6 +671,12 @@ small { color: var(--meta); }
   background: rgba(2, 6, 23, 0.04);
 }
 
+/* Compact table variant for dense data */
+.table-compact th,
+.table-compact td {
+  padding: 10px 8px;
+}
+
 /* =========================
    EMPTY STATES
    ========================= */
@@ -761,6 +790,21 @@ summary {
   user-select: none;
   font-weight: 900;
   color: var(--text);
+  list-style: none;
+}
+
+summary::-webkit-details-marker {
+  display: none;
+}
+
+summary::before {
+  content: "▸ ";
+  font-size: 0.85em;
+  margin-right: 4px;
+}
+
+details[open] > summary::before {
+  content: "▾ ";
 }
 
 summary:hover { color: var(--brand2); }
@@ -783,6 +827,7 @@ summary:hover { color: var(--brand2); }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", "Courier New", monospace;
+  font-size: max(0.85em, 13px); /* Ensure readability at smaller sizes */
 }
 
 

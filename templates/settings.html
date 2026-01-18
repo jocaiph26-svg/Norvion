@@ -1,13 +1,114 @@
 {% extends "base.html" %}
 {% block content %}
   {% set run_link_id = active_run_id if active_run_id else (latest_run_id if latest_run_id else None) %}
+  {% set is_admin = access_role == 'admin' %}
   <div class="header">
     <div>
-      <h1 class="h1">Settings (read-only)</h1>
-      <p class="sub">Upload-time defaults are stored per run. Updates are disabled in this environment.</p>
+      <h1 class="h1">Settings{% if not is_admin %} (read-only){% endif %}</h1>
+      <p class="sub">
+        {% if is_admin %}
+          Configure analysis defaults. Changes apply to future runs only.
+        {% else %}
+          Upload-time defaults are stored per run. Contact an admin to modify settings.
+        {% endif %}
+      </p>
     </div>
   </div>
 
+  {% if saved %}
+    <div class="card" style="background:var(--bg-success, #d4edda); border-left:4px solid var(--success, #28a745); margin-bottom:16px;">
+      <div class="card-b" style="padding:12px 16px;">
+        <strong>Settings saved successfully.</strong> Changes will apply to future analysis runs.
+      </div>
+    </div>
+  {% endif %}
+
+  {% if is_admin %}
+  {# Admin: editable form #}
+  <form method="POST" action="/settings">
+    {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+    <div class="card">
+      <div class="card-b">
+        <h2>Analysis defaults</h2>
+        <div class="hr"></div>
+        <table style="width:100%; border-collapse:collapse;">
+          <tbody>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="currency">Currency</label></td>
+              <td style="padding:8px 0;"><input type="text" id="currency" name="currency" value="{{ s.currency }}" maxlength="3" style="width:60px; padding:4px 8px;"></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="starting_cash">Starting cash</label></td>
+              <td style="padding:8px 0;"><input type="number" id="starting_cash" name="starting_cash" value="{{ s.starting_cash }}" min="0" step="0.01" style="width:120px; padding:4px 8px;"></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="window_days">Window days</label></td>
+              <td style="padding:8px 0;"><input type="number" id="window_days" name="window_days" value="{{ s.window_days }}" min="7" max="365" style="width:80px; padding:4px 8px;"></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="burn_days">Burn days</label></td>
+              <td style="padding:8px 0;"><input type="number" id="burn_days" name="burn_days" value="{{ s.burn_days }}" min="7" max="180" style="width:80px; padding:4px 8px;"></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="low_cash_buffer_days">Low cash buffer days</label></td>
+              <td style="padding:8px 0;"><input type="number" id="low_cash_buffer_days" name="low_cash_buffer_days" value="{{ s.low_cash_buffer_days }}" min="1" max="90" style="width:80px; padding:4px 8px;"></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="expense_spike_pct">Expense spike threshold</label></td>
+              <td style="padding:8px 0;"><input type="number" id="expense_spike_pct" name="expense_spike_pct" value="{{ s.expense_spike_pct }}" min="0.01" max="1.0" step="0.01" style="width:80px; padding:4px 8px;"> <span class="small">(0.01 - 1.0)</span></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="revenue_drop_pct">Revenue drop threshold</label></td>
+              <td style="padding:8px 0;"><input type="number" id="revenue_drop_pct" name="revenue_drop_pct" value="{{ s.revenue_drop_pct }}" min="0.01" max="1.0" step="0.01" style="width:80px; padding:4px 8px;"> <span class="small">(0.01 - 1.0)</span></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="concentration_threshold">Concentration threshold</label></td>
+              <td style="padding:8px 0;"><input type="number" id="concentration_threshold" name="concentration_threshold" value="{{ s.concentration_threshold }}" min="0.1" max="1.0" step="0.01" style="width:80px; padding:4px 8px;"> <span class="small">(0.1 - 1.0)</span></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="large_txn_sigma">Large transaction sigma</label></td>
+              <td style="padding:8px 0;"><input type="number" id="large_txn_sigma" name="large_txn_sigma" value="{{ s.large_txn_sigma }}" min="1.0" max="10.0" step="0.1" style="width:80px; padding:4px 8px;">σ <span class="small">(standard deviations)</span></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="recurring_min_hits">Recurring expense min hits</label></td>
+              <td style="padding:8px 0;"><input type="number" id="recurring_min_hits" name="recurring_min_hits" value="{{ s.recurring_min_hits }}" min="2" max="12" style="width:80px; padding:4px 8px;"> <span class="small">occurrences</span></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="overdue_days">Overdue grace days</label></td>
+              <td style="padding:8px 0;"><input type="number" id="overdue_days" name="overdue_days" value="{{ s.overdue_days }}" min="1" max="90" style="width:80px; padding:4px 8px;"></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="recent_compare_days">Recent compare days</label></td>
+              <td style="padding:8px 0;"><input type="number" id="recent_compare_days" name="recent_compare_days" value="{{ s.recent_compare_days }}" min="7" max="180" style="width:80px; padding:4px 8px;"></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="demo_mode">Demo mode</label></td>
+              <td style="padding:8px 0;">
+                <select id="demo_mode" name="demo_mode" style="padding:4px 8px;">
+                  <option value="true" {% if s.demo_mode %}selected{% endif %}>Development</option>
+                  <option value="false" {% if not s.demo_mode %}selected{% endif %}>Production</option>
+                </select>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:800;"><label for="enable_integrations_scaffold">Integrations scaffold</label></td>
+              <td style="padding:8px 0;">
+                <select id="enable_integrations_scaffold" name="enable_integrations_scaffold" style="padding:4px 8px;">
+                  <option value="true" {% if s.enable_integrations_scaffold %}selected{% endif %}>Enabled</option>
+                  <option value="false" {% if not s.enable_integrations_scaffold %}selected{% endif %}>Disabled</option>
+                </select>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="margin-top:16px;">
+          <button type="submit" class="btn">Save Settings</button>
+        </div>
+      </div>
+    </div>
+  </form>
+  {% else %}
+  {# Non-admin: read-only view #}
   <div class="card">
     <div class="card-b">
       <h2>Current defaults (stored)</h2>
@@ -22,14 +123,101 @@
           <tr><td style="padding:6px 0; font-weight:800;">Expense spike threshold</td><td style="padding:6px 0;">{{ s.expense_spike_pct }}</td></tr>
           <tr><td style="padding:6px 0; font-weight:800;">Revenue drop threshold</td><td style="padding:6px 0;">{{ s.revenue_drop_pct }}</td></tr>
           <tr><td style="padding:6px 0; font-weight:800;">Concentration threshold</td><td style="padding:6px 0;">{{ s.concentration_threshold }}</td></tr>
-          <tr><td style="padding:6px 0; font-weight:800;">Large transaction sigma</td><td style="padding:6px 0;">{{ s.large_txn_sigma }}</td></tr>
-          <tr><td style="padding:6px 0; font-weight:800;">Recurring expense min hits</td><td style="padding:6px 0;">{{ s.recurring_min_hits }}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Large transaction sigma</td><td style="padding:6px 0;">{{ s.large_txn_sigma }}σ (standard deviations)</td></tr>
+          <tr><td style="padding:6px 0; font-weight:800;">Recurring expense min hits</td><td style="padding:6px 0;">{{ s.recurring_min_hits }} occurrences</td></tr>
           <tr><td style="padding:6px 0; font-weight:800;">Overdue grace days</td><td style="padding:6px 0;">{{ s.overdue_days }}</td></tr>
           <tr><td style="padding:6px 0; font-weight:800;">Recent compare days</td><td style="padding:6px 0;">{{ s.recent_compare_days }}</td></tr>
-          <tr><td style="padding:6px 0; font-weight:800;">Development mode</td><td style="padding:6px 0;">{{ "True" if s.demo_mode else "False" }}</td></tr>
-          <tr><td style="padding:6px 0; font-weight:800;">Integrations scaffold</td><td style="padding:6px 0;">{{ "True" if s.enable_integrations_scaffold else "False" }}</td></tr>
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Environment</td>
+            <td style="padding:6px 0;">
+              {{ "Development" if s.demo_mode else "Production" }}
+              <div class="small" style="color:var(--muted); margin-top:2px;">Configurable via environment variables.</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Integrations</td>
+            <td style="padding:6px 0;">
+              {{ "Enabled (scaffold)" if s.enable_integrations_scaffold else "Disabled" }}
+            </td>
+          </tr>
         </tbody>
       </table>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="card" style="margin-top:16px;">
+    <div class="card-b">
+      <h2>Encryption at rest</h2>
+      <div class="hr"></div>
+      <table style="width:100%; border-collapse:collapse;">
+        <tbody>
+          <tr>
+            <td style="padding:6px 0; font-weight:800; width:200px;">Application-layer encryption</td>
+            <td style="padding:6px 0;"><span class="badge" style="background:var(--muted);">Not implemented</span></td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Database encryption</td>
+            <td style="padding:6px 0;">SQLite does NOT encrypt data at rest by default</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Operator responsibility</td>
+            <td style="padding:6px 0;">Infrastructure-level encryption (encrypted volumes, cloud provider encryption)</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Production requirement</td>
+            <td style="padding:6px 0;">Deploy on encrypted storage volumes and enforce TLS/HTTPS</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Compliance guidance</td>
+            <td style="padding:6px 0;">See README.md for GDPR, PCI DSS, HIPAA, SOX considerations</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="small" style="margin-top:12px; color:var(--muted);">
+        <strong>Important:</strong> This application assumes infrastructure-level encryption is provided by the deployment environment.
+        Operators are responsible for using encrypted disk volumes, cloud provider encryption, or filesystem-level encryption.
+        Application-layer encryption is deliberately not implemented to avoid security theater and maintain operational transparency.
+      </div>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        <strong>Production checklist:</strong> Verify database file resides on encrypted volume, backups are encrypted, TLS/HTTPS is enforced, and file permissions restrict access.
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <div class="card-b">
+      <h2>Data retention policy</h2>
+      <div class="hr"></div>
+      <table style="width:100%; border-collapse:collapse;">
+        <tbody>
+          <tr>
+            <td style="padding:6px 0; font-weight:800; width:200px;">Default behavior</td>
+            <td style="padding:6px 0;">Data retained indefinitely unless explicitly deleted</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Retention scope</td>
+            <td style="padding:6px 0;">Runs, alerts, audit events, alert state records</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Deletion policy</td>
+            <td style="padding:6px 0;">Manual only (operator-initiated, logged)</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Audit requirement</td>
+            <td style="padding:6px 0;">All deletions must be explicit, logged, and compliant with regulations</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0; font-weight:800;">Compliance responsibility</td>
+            <td style="padding:6px 0;">Operators must implement retention policies appropriate to their regulatory environment (GDPR, SOX, etc.)</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="small" style="margin-top:12px; color:var(--muted);">
+        <strong>Note:</strong> This version does not include automated data cleanup.
+        Organizations must manage data retention according to their compliance requirements.
+        Future versions may add configurable, deterministic retention policies with full audit trails.
+      </div>
     </div>
   </div>
 

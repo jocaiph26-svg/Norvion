@@ -6,7 +6,7 @@
         <div class="row" style="align-items:center; gap:10px; margin-bottom:6px;">
           <h1 class="h1" style="margin:0;">Run {{ latest_run.id }}</h1>
           {% if run_scope and not run_scope.is_latest %}
-            <span class="badge">Historical (snapshot)</span>
+            <span class="badge">Stored run (read-only)</span>
           {% else %}
             <span class="badge">Latest</span>
           {% endif %}
@@ -39,17 +39,23 @@
 
     <div class="grid cols-4">
     <div class="card kpi">
-      <div class="label">Modeled cash position</div>
+      <div class="label">Calculated cash position</div>
       <div class="value">
         {% if s.current_cash is not none %}
           {{ s.current_cash|money(s.currency) }}
         {% endif %}
       </div>
-      <div class="hint">{% if s.current_cash is not none %}Computed from starting cash + cumulative net change.{% endif %}</div>
+      <div class="hint">
+        {% if s.current_cash is not none %}
+          Computed from starting cash + cumulative net change.
+        {% else %}
+          Not available for this run.
+        {% endif %}
+      </div>
     </div>
 
       <div class="card kpi">
-        <div class="label">Modeled runway (static burn)</div>
+        <div class="label">Calculated runway (static burn)</div>
         <div class="value">
           {% if s.runway_days is not none and s.runway_days <= 0 %}
             ≤0 days
@@ -59,7 +65,9 @@
         </div>
         <div class="hint">
           {% if s.runway_days is not none %}
-            Extrapolated from current cash ÷ burn rate. Assumes no revenue or expense changes.
+            Computed from current cash ÷ burn rate (static). Does not account for future changes.
+          {% else %}
+            Not available for this run.
           {% endif %}
         </div>
       </div>
@@ -71,7 +79,13 @@
           {{ s.recent_income|money(s.currency) }}
         {% endif %}
       </div>
-      <div class="hint">{% if s.recent_income is not none %}Stored in the most recent compare window.{% endif %}</div>
+      <div class="hint">
+        {% if s.recent_income is not none %}
+          Stored in the most recent compare window.
+        {% else %}
+          Not available for this run.
+        {% endif %}
+      </div>
     </div>
 
     <div class="card kpi">
@@ -81,7 +95,13 @@
           {{ s.recent_expense|money(s.currency) }}
         {% endif %}
       </div>
-      <div class="hint">{% if s.recent_expense is not none %}Stored in the most recent compare window.{% endif %}</div>
+      <div class="hint">
+        {% if s.recent_expense is not none %}
+          Stored in the most recent compare window.
+        {% else %}
+          Not available for this run.
+        {% endif %}
+      </div>
     </div>
     </div>
 
@@ -164,7 +184,14 @@
             <tbody>
               {% for v in s.concentration_top_vendors_expense %}
                 <tr>
-                  <td style="padding:6px 0;">{{ v.counterparty }}</td>
+                  <td style="padding:6px 0;">
+                    {%- set vendor_name = v.counterparty|string|trim -%}
+                    {%- if vendor_name == '' or vendor_name|lower == 'nan' or vendor_name|lower == 'none' or vendor_name|lower == 'null' -%}
+                      <span style="color:var(--muted); font-style:italic;">(No vendor recorded)</span>
+                    {%- else -%}
+                      {{ vendor_name }}
+                    {%- endif -%}
+                  </td>
                   <td style="padding:6px 0;">{{ v.amount|money(s.currency) }}</td>
                   <td style="padding:6px 0;">{{ v.share|pct }}</td>
                 </tr>
@@ -190,7 +217,14 @@
             <tbody>
               {% for c in s.concentration_top_categories_expense %}
                 <tr>
-                  <td style="padding:6px 0;">{{ c.category }}</td>
+                  <td style="padding:6px 0;">
+                    {%- set category_name = c.category|string|trim -%}
+                    {%- if category_name == '' or category_name|lower == 'nan' or category_name|lower == 'none' or category_name|lower == 'null' -%}
+                      <span style="color:var(--muted); font-style:italic;">(No category recorded)</span>
+                    {%- else -%}
+                      {{ category_name }}
+                    {%- endif -%}
+                  </td>
                   <td style="padding:6px 0;">{{ c.amount|money(s.currency) }}</td>
                   <td style="padding:6px 0;">{{ c.share|pct }}</td>
                 </tr>

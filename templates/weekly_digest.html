@@ -13,7 +13,7 @@
 
   <div class="grid cols-2">
     <div class="card"><div class="card-b">
-      <h2>Open / quieted alerts</h2>
+      <h2>Active alerts</h2>
       <div class="hr"></div>
       {% if unresolved|length == 0 %}
         <div class="callout">No active alerts.</div>
@@ -43,7 +43,7 @@
           <div class="pill">New: {{ new_events|length }}</div>
           <div class="pill">Reopened: {{ reopened_events|length }}</div>
           <div class="pill">Worsened: {{ worsened_events|length }}</div>
-          <div class="pill">Resolved: {{ resolved_events|length }}</div>
+          <div class="pill">Closed: {{ resolved_events|length }}</div>
         </div>
         <div class="row" style="margin-top:8px; gap:8px; align-items:center;">
           <label style="font-weight:800; font-size:13px;">

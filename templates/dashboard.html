@@ -9,7 +9,7 @@
           {% if run_scope.is_latest %}
             <span class="badge">Latest</span>
           {% else %}
-            <span class="badge">Historical (snapshot)</span>
+            <span class="badge">Stored run (read-only)</span>
           {% endif %}
         </div>
       {% endif %}
@@ -23,16 +23,22 @@
 
   <div class="grid cols-4">
     <div class="card kpi">
-      <div class="label">Modeled cash position</div>
+      <div class="label">Calculated cash position</div>
       <div class="value">
         {% if summary.current_cash is not none %}
           {{ summary.current_cash|money(summary.currency) }}
         {% endif %}
       </div>
-      <div class="hint">{% if summary.current_cash is not none %}Computed from starting cash + cumulative net change.{% endif %}</div>
+      <div class="hint">
+        {% if summary.current_cash is not none %}
+          Computed from starting cash + cumulative net change.
+        {% else %}
+          Not available for this run.
+        {% endif %}
+      </div>
     </div>
     <div class="card kpi">
-      <div class="label">Modeled runway (static burn)</div>
+      <div class="label">Calculated runway (static burn)</div>
       <div class="value">
         {% if summary.runway_days is not none and summary.runway_days <= 0 %}
           ≤0 days
@@ -42,7 +48,9 @@
       </div>
       <div class="hint">
         {% if summary.runway_days is not none %}
-          Extrapolated from current cash ÷ burn rate. Assumes no revenue or expense changes.
+          Computed from current cash ÷ burn rate (static). Does not account for future changes.
+        {% else %}
+          Not available for this run.
         {% endif %}
       </div>
     </div>
@@ -54,7 +62,13 @@
           {{ summary.recent_income|money(summary.currency) }}
         {% endif %}
       </div>
-      <div class="hint">{% if summary.recent_income is defined and summary.recent_income is not none %}Stored in the most recent compare window.{% endif %}</div>
+      <div class="hint">
+        {% if summary.recent_income is defined and summary.recent_income is not none %}
+          Stored in the most recent compare window.
+        {% else %}
+          Not available for this run.
+        {% endif %}
+      </div>
     </div>
     <div class="card kpi">
       <div class="label">Recent expenses</div>
@@ -63,7 +77,13 @@
           {{ summary.recent_expense|money(summary.currency) }}
         {% endif %}
       </div>
-      <div class="hint">{% if summary.recent_expense is defined and summary.recent_expense is not none %}Stored in the most recent compare window.{% endif %}</div>
+      <div class="hint">
+        {% if summary.recent_expense is defined and summary.recent_expense is not none %}
+          Stored in the most recent compare window.
+        {% else %}
+          Not available for this run.
+        {% endif %}
+      </div>
     </div>
     <div class="card kpi">
       <div class="label">Data completeness (system-derived)</div>
@@ -76,7 +96,12 @@
       </div>
       <div class="hint">
         {% if quality.score is not none or quality.band %}
-          Stored completeness indicator for this run.
+          <details style="font-size:inherit;">
+            <summary style="cursor:pointer;">Band: A≥85, B≥70, C≥50, D&lt;50</summary>
+            <div style="margin-top:4px; font-size:11px; color:var(--muted);">
+              Score factors: uncategorised share (-25%), unknown vendors (-20%), duplicate rate (-15%), date coverage, invoice/direction fields. Does not certify accuracy.
+            </div>
+          </details>
         {% else %}
           Data completeness information is not available for this run.
         {% endif %}
@@ -91,6 +116,7 @@
       <h2>What changed since prior run (stored)</h2>
       <div class="small" style="margin-top:6px; color:var(--muted);">
         Differences are stored at run creation and shown without recomputation.
+        This is a point-in-time comparison, not trend analysis or forecasting.
       </div>
       {% if summary.run_to_run %}
         <div class="small" style="margin-top:8px; color:#334155;">
@@ -214,7 +240,11 @@
       <p class="sub" style="margin-top:6px;">Alerts recorded in this run.</p>
       {% if alerts|length == 0 %}
         <div class="callout">
-          <strong>No alerts were triggered for this run.</strong> Some checks may not have been evaluated if required data was missing.
+          <strong>No alerts were triggered for this run.</strong>
+          <div style="margin-top:6px;">
+            The absence of alerts does not indicate business health or data accuracy.
+            Some checks may not have been evaluated if required data was missing.
+          </div>
         </div>
       {% else %}
         <div class="row" style="margin-top:8px;">
@@ -255,11 +285,11 @@
         <div class="card-b">
           <h2>Run context (stored)</h2>
           <div class="row" style="margin-top:8px; flex-wrap:wrap;">
-            <div class="pill">Recorded at: {{ created_at|humandt }}</div>
+            <div class="pill">Recorded at (stored): {{ created_at|humandt }}</div>
             {% if summary.window_start_date and summary.end_date %}
-              <div class="pill dim">Window: {{ summary.window_start_date }} to {{ summary.end_date }} (inclusive)</div>
+              <div class="pill dim">Window (stored): {{ summary.window_start_date }} to {{ summary.end_date }} (inclusive)</div>
             {% endif %}
-            <div class="pill dim">Data completeness: {{ '%.0f'|format(quality.score or 0) }}/100{% if quality.band %} ({{ quality.band }}){% endif %}</div>
+            <div class="pill dim">Data completeness (stored): {{ '%.0f'|format(quality.score or 0) }}/100{% if quality.band %} ({{ quality.band }}){% endif %}</div>
           </div>
         </div>
       </div>
@@ -479,6 +509,7 @@
       <h2>Run‑to‑run change ledger (stored at run time)</h2>
       <div class="small" style="margin-top:6px; color:var(--muted);">
         Differences are stored at run creation and shown without recomputation.
+        This is a point-in-time comparison, not trend analysis or forecasting.
       </div>
       {% if summary.run_to_run %}
         <div class="small" style="margin-top:8px; color:#334155;">
@@ -667,7 +698,14 @@
           <tbody>
             {% for v in summary.concentration_top_vendors_expense %}
               <tr>
-                <td style="padding:6px 0;">{{ v.counterparty }}</td>
+                <td style="padding:6px 0;">
+                  {%- set vendor_name = v.counterparty|string|trim -%}
+                  {%- if vendor_name == '' or vendor_name|lower == 'nan' or vendor_name|lower == 'none' or vendor_name|lower == 'null' -%}
+                    <span style="color:var(--muted); font-style:italic;">(No vendor recorded)</span>
+                  {%- else -%}
+                    {{ vendor_name }}
+                  {%- endif -%}
+                </td>
                 <td style="padding:6px 0;">{{ v.amount|money(summary.currency) }}</td>
                 <td style="padding:6px 0;">{{ v.share|pct }}</td>
               </tr>
@@ -693,7 +731,14 @@
           <tbody>
             {% for c in summary.concentration_top_categories_expense %}
               <tr>
-                <td style="padding:6px 0;">{{ c.category }}</td>
+                <td style="padding:6px 0;">
+                  {%- set category_name = c.category|string|trim -%}
+                  {%- if category_name == '' or category_name|lower == 'nan' or category_name|lower == 'none' or category_name|lower == 'null' -%}
+                    <span style="color:var(--muted); font-style:italic;">(No category recorded)</span>
+                  {%- else -%}
+                    {{ category_name }}
+                  {%- endif -%}
+                </td>
                 <td style="padding:6px 0;">{{ c.amount|money(summary.currency) }}</td>
                 <td style="padding:6px 0;">{{ c.share|pct }}</td>
               </tr>
@@ -719,7 +764,11 @@
 
       {% if alerts|length == 0 %}
         <div class="callout">
-          <strong>No alerts were triggered for this run.</strong> Some checks may not have been evaluated if required data was missing.
+          <strong>No alerts were triggered for this run.</strong>
+          <div style="margin-top:6px;">
+            The absence of alerts does not indicate business health or data accuracy.
+            Some checks may not have been evaluated if required data was missing.
+          </div>
         </div>
       {% else %}
         <div class="grid">
@@ -732,7 +781,7 @@
                   <p class="why">{{ a.why }}</p>
                   <div class="row" style="margin-top:6px; flex-wrap:wrap;">
                     <div class="pill dim">Status (stored): {{ a._status|capitalize }}</div>
-                    {% if a._updated_at %}<div class="pill dim">Updated: {{ a._updated_at|humandt }}</div>{% endif %}
+                    {% if a._updated_at %}<div class="pill dim">Updated (stored): {{ a._updated_at|humandt }}</div>{% endif %}
                   </div>
                   <div style="margin-top:8px;">
                     <a class="link" href="/alerts/{{ a.id }}{{ run_qs if run_qs is defined else '' }}">Open</a>
@@ -748,7 +797,7 @@
                   <div class="field">
                     <label>Status</label>
                     <select name="status" {% if not can_update %}disabled{% endif %}>
-                      {% for opt in ['review','noted','actioned','ignore','snoozed'] %}
+                      {% for opt in ['review','noted','acknowledged','ignore','snoozed'] %}
                         <option value="{{ opt }}" {{ 'selected' if a._status==opt else '' }}>{{ opt|capitalize }}</option>
                       {% endfor %}
                     </select>
@@ -766,12 +815,17 @@
                   <div class="row" style="margin-top:10px;">
                     <button class="btn btn-primary" type="submit" {% if not can_update %}disabled{% else %}disabled{% endif %}>Record status</button>
                   </div>
+                  {% if can_update %}
+                    <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
+                      Button enables when status or note changes.
+                    </div>
+                  {% endif %}
                   <div class="row" style="margin-top:10px; flex-wrap:wrap;">
                     <div class="pill dim">Signal band (stored): {{ a.signal_strength }}</div>
                     {% if a.suppressed and a.suppression_reason %}
-                      <div class="pill dim">Suppressed: {{ a.suppression_reason }}</div>
+                      <div class="pill dim">Suppressed (stored): {{ a.suppression_reason }}</div>
                     {% elif a.suppressed %}
-                      <div class="pill dim">Suppressed</div>
+                      <div class="pill dim">Suppressed (stored)</div>
                     {% endif %}
                     {% if a.quality_context and a.quality_context.score is not none %}
                       <div class="pill dim">
@@ -818,8 +872,8 @@
 
   <div class="card">
     <div class="card-b">
-      <h2>Checks not evaluated (run-time snapshot)</h2>
-      <p class="sub" style="margin-top:6px;">Per-rule reasons why checks were not run or did not fire, recorded at analysis time.</p>
+      <h2 id="checks-not-evaluated">Checks not evaluated (run-time snapshot)</h2>
+      <p class="sub" style="margin-top:6px;">Per-rule reasons why checks were not run or did not fire, recorded at analysis time. See <a class="link" href="/settings{{ run_qs if run_qs is defined else '' }}">Settings</a> for configured thresholds.</p>
       <div class="hr"></div>
       {% if summary.non_trigger_explainability and summary.non_trigger_explainability|length > 0 %}
         <table class="table">
@@ -841,7 +895,7 @@
                   {% elif r.reason == "missing_data" %}
                     Missing: {{ r.missing_gates|join(", ") }}
                   {% elif r.reason == "threshold_not_crossed" %}
-                    Threshold not crossed
+                    Threshold not crossed{% if r.threshold is defined and r.threshold is not none %} (threshold: {{ r.threshold }}){% endif %}{% if r.actual is defined and r.actual is not none %}, actual: {{ r.actual }}{% endif %}
                   {% endif %}
                 </td>
               </tr>
@@ -861,6 +915,7 @@
       <h2>Data completeness (stored)</h2>
       <div class="small" style="color:var(--muted); margin-top:4px;">
         Stored score, band, and coverage fields for this run.
+        Bands are derived from score thresholds: Good (≥80), Moderate (≥50), Poor (&lt;50).
       </div>
       <div class="hr"></div>
       <div class="row">
@@ -883,13 +938,13 @@
       {% if params and params.ledger_contract %}
         <div class="row">
           {% if params.ledger_contract.schema_version %}
-            <div class="pill">Schema: {{ params.ledger_contract.schema_version }}</div>
+            <div class="pill">Schema (stored): {{ params.ledger_contract.schema_version }}</div>
           {% endif %}
           {% if params.ledger_contract.adapter_version %}
-            <div class="pill dim">Adapter: {{ params.ledger_contract.adapter_version }}</div>
+            <div class="pill dim">Adapter (stored): {{ params.ledger_contract.adapter_version }}</div>
           {% endif %}
           {% if params.ledger_contract.row_count is not none %}
-            <div class="pill dim">Rows: {{ params.ledger_contract.row_count }}</div>
+            <div class="pill dim">Rows (stored): {{ params.ledger_contract.row_count }}</div>
           {% endif %}
         </div>
         {% if params.ledger_contract.columns_present %}

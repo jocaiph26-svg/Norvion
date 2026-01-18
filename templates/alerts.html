@@ -8,8 +8,7 @@
         <div class="row" style="align-items:center; gap:8px; margin-top:8px;">
           <span class="badge">Run {{ latest_run.id }}</span>
           {% if active_run_id is defined and latest_run_id is defined and active_run_id and latest_run_id and (active_run_id != latest_run_id) %}
-            <span class="badge">Historical run</span>
-            <span class="badge muted">Viewing snapshot</span>
+            <span class="badge">Stored run (read-only)</span>
           {% else %}
             <span class="badge">Latest run</span>
           {% endif %}
@@ -57,8 +56,15 @@
                 Alert checks were not evaluated due to data completeness score below threshold.
               {% endif %}
             </div>
+            <div class="callout" style="margin-top:12px; text-align:left;">
+              <strong>Important:</strong> The absence of alerts does not indicate business health or data accuracy.
+              Some checks may not have been evaluated if required data was missing.
+              {% if latest_run %}
+                <a class="link" href="/run/{{ latest_run.id }}{{ run_qs if run_qs is defined else '' }}#checks-not-evaluated">View checks not evaluated</a> for this run.
+              {% endif %}
+            </div>
             {% if latest_run %}
-              <a class="btn primary" style="margin-left:8px;" href="/run/{{ latest_run.id }}{{ run_qs if run_qs is defined else '' }}">View run detail</a>
+              <a class="btn primary" style="margin-top:8px;" href="/run/{{ latest_run.id }}{{ run_qs if run_qs is defined else '' }}">View run detail</a>
             {% endif %}
           </div>
         {% else %}
@@ -93,27 +99,65 @@
                   </div>
                 {% endif %}
                 {% if a.evidence and a.evidence.items is defined %}
-                  <details style="margin-top:8px;">
-                    <summary class="small" style="cursor:pointer; color:var(--muted);">Show evidence (stored)</summary>
-                    <table style="width:100%; border-collapse:collapse; margin-top:6px;">
-                      <thead>
-                        <tr>
-                          <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Field</th>
-                          <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Value</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {% for k, v in a.evidence.items() %}
-                          {% if v is not none and v != '' %}
-                            <tr>
-                              <td style="padding:6px 0;">{{ k }}</td>
-                              <td style="padding:6px 0;">{{ v }}</td>
-                            </tr>
-                          {% endif %}
-                        {% endfor %}
-                      </tbody>
-                    </table>
-                  </details>
+                  {# Count displayable evidence rows (exclude None, nan, inputs) #}
+                  {% set ev_count = namespace(val=0) %}
+                  {% for k, v in a.evidence.items() %}
+                    {%- set v_str = v|string|trim -%}
+                    {% if v is not none and v != '' and v_str != 'None' and v_str != 'nan' and k != 'inputs' %}
+                      {% set ev_count.val = ev_count.val + 1 %}
+                    {% endif %}
+                  {% endfor %}
+                  {% if ev_count.val > 0 %}
+                    <details style="margin-top:8px;">
+                      <summary class="small" style="cursor:pointer; color:var(--muted);">Show evidence (stored)</summary>
+                      <table style="width:100%; border-collapse:collapse; margin-top:6px;">
+                        <thead>
+                          <tr>
+                            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Field</th>
+                            <th style="text-align:left; border-bottom:1px solid #e2e8f0; padding:6px 0;">Value</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% for k, v in a.evidence.items() %}
+                            {%- set v_str = v|string|trim -%}
+                            {% if v is not none and v != '' and v_str != 'None' and v_str != 'nan' and k != 'inputs' %}
+                              <tr>
+                                <td style="padding:6px 0;">{{ k|replace('_', ' ')|title }}</td>
+                                <td style="padding:6px 0;">
+                                  {%- if v is mapping -%}
+                                    <div class="small" style="line-height:1.6;">
+                                      {% for dk, dv in v.items() %}
+                                        <div><span style="font-weight:600;">{{ dk|replace('_', ' ')|title }}:</span> {{ dv }}</div>
+                                      {% endfor %}
+                                    </div>
+                                  {%- elif v is iterable and v is not string -%}
+                                    {% if v|length > 0 and v[0] is mapping %}
+                                      <div class="small" style="line-height:1.6;">
+                                        {% for item in v[:3] %}
+                                          <div style="margin-bottom:4px; padding-left:8px; border-left:2px solid var(--border);">
+                                            {% for ik, iv in item.items() %}
+                                              <span style="font-weight:600;">{{ ik|replace('_', ' ')|title }}:</span> {{ iv }}{% if not loop.last %}, {% endif %}
+                                            {% endfor %}
+                                          </div>
+                                        {% endfor %}
+                                        {% if v|length > 3 %}
+                                          <div style="color:var(--muted);">... and {{ v|length - 3 }} more</div>
+                                        {% endif %}
+                                      </div>
+                                    {% else %}
+                                      {{ v|join(', ') }}
+                                    {% endif %}
+                                  {%- else -%}
+                                    {{ v }}
+                                  {%- endif -%}
+                                </td>
+                              </tr>
+                            {% endif %}
+                          {% endfor %}
+                        </tbody>
+                      </table>
+                    </details>
+                  {% endif %}
                 {% endif %}
               </div>
             {% endfor %}
@@ -123,11 +167,11 @@
         {% if quieted_resolved|length > 0 %}
           <div class="hr"></div>
           <details>
-            <summary style="cursor:pointer; font-weight:900;">Show quieted / resolved ({{ quieted_resolved|length }})</summary>
+            <summary style="cursor:pointer; font-weight:900;">Show quieted / closed ({{ quieted_resolved|length }})</summary>
             <div style="margin-top:12px;" class="grid">
               {% for a in quieted_resolved %}
                 {% set aid = a.alert_id if a.alert_id is defined and a.alert_id else a.id %}
-                {% set status_class = a.status|lower if a.status|lower in ['review','noted','suppressed','quieted','resolved'] else '' %}
+                {% set status_class = a.status|lower if a.status|lower in ['review','noted','acknowledged','ignore','snoozed','suppressed','quieted','closed'] else '' %}
                 <div class="alert alert-compact">
                   <a class="alert-link" href="/alerts/{{ aid }}{{ run_qs if run_qs is defined else '' }}">
                     <div class="badge {{ status_class }}">{{ a.status|upper }}</div>

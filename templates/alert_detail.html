@@ -32,6 +32,7 @@
           {% set threshold_val = ev.threshold if ev.threshold is not none and ev.threshold != '' else none %}
           {% set overdue_days_val = ev.overdue_days if ev.overdue_days is not none else none %}
           {% set gap_val = ev.gap if ev.gap is not none else none %}
+          {# Only show key evidence section if we have actual displayable values (not None/empty) #}
           {% set has_key_evidence = (
             ev.comparison_label or
             runway_val is not none or
@@ -214,9 +215,11 @@
             </table>
 
             {% if alert_details.evidence and alert_details.evidence.items is defined %}
+              {# Filter evidence to exclude None, empty, and internal fields; format complex values #}
               {% set ev_ns = namespace(rows=0) %}
               {% for k, v in alert_details.evidence.items() %}
-                {% if v is not none and v != '' %}
+                {%- set v_str = v|string|trim -%}
+                {% if v is not none and v != '' and v_str != 'None' and v_str != 'nan' and k != 'inputs' %}
                   {% set ev_ns.rows = ev_ns.rows + 1 %}
                 {% endif %}
               {% endfor %}
@@ -232,10 +235,43 @@
                   </thead>
                   <tbody>
                     {% for k, v in alert_details.evidence.items() %}
-                      {% if v is not none and v != '' %}
+                      {%- set v_str = v|string|trim -%}
+                      {% if v is not none and v != '' and v_str != 'None' and v_str != 'nan' and k != 'inputs' %}
                         <tr>
-                          <td style="padding:6px 0;">{{ k }}</td>
-                          <td style="padding:6px 0;">{{ v }}</td>
+                          <td style="padding:6px 0;">{{ k|replace('_', ' ')|title }}</td>
+                          <td style="padding:6px 0;">
+                            {#- Format complex types (lists/dicts) as readable text -#}
+                            {%- if v is mapping -%}
+                              {#- Dict: format as key-value pairs -#}
+                              <div class="small" style="line-height:1.6;">
+                                {% for dk, dv in v.items() %}
+                                  <div><span style="font-weight:600;">{{ dk|replace('_', ' ')|title }}:</span> {{ dv }}</div>
+                                {% endfor %}
+                              </div>
+                            {%- elif v is iterable and v is not string -%}
+                              {#- List: check if it's a list of dicts or simple values -#}
+                              {% if v|length > 0 and v[0] is mapping %}
+                                {#- List of dicts (e.g., overdue invoices) -#}
+                                <div class="small" style="line-height:1.6;">
+                                  {% for item in v[:5] %}
+                                    <div style="margin-bottom:4px; padding-left:8px; border-left:2px solid var(--border);">
+                                      {% for ik, iv in item.items() %}
+                                        <span style="font-weight:600;">{{ ik|replace('_', ' ')|title }}:</span> {{ iv }}{% if not loop.last %}, {% endif %}
+                                      {% endfor %}
+                                    </div>
+                                  {% endfor %}
+                                  {% if v|length > 5 %}
+                                    <div style="color:var(--muted);">... and {{ v|length - 5 }} more</div>
+                                  {% endif %}
+                                </div>
+                              {% else %}
+                                {#- Simple list -#}
+                                {{ v|join(', ') }}
+                              {% endif %}
+                            {%- else -%}
+                              {{ v }}
+                            {%- endif -%}
+                          </td>
                         </tr>
                       {% endif %}
                     {% endfor %}
@@ -288,7 +324,7 @@
             <label>Status</label>
             <select name="status" {% if not can_update %}disabled{% endif %}>
               {% set cur = state.status if state else 'review' %}
-              {% for opt in ['review','noted','actioned','ignore','snoozed'] %}
+              {% for opt in ['review','noted','acknowledged','ignore','snoozed'] %}
                 <option value="{{ opt }}" {{ 'selected' if cur==opt else '' }}>{{ opt|capitalize }}</option>
               {% endfor %}
             </select>
@@ -299,7 +335,7 @@
               Changes are recorded when you click Record status.
             </div>
             <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
-              Status may return to review if the stored score increases in a later run.
+              Status is stored per alert instance. New runs evaluate alerts independently.
             </div>
             <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
               Note: Status updates do not track remediation evidence or approval workflows.
@@ -315,9 +351,14 @@
             <button class="btn btn-primary" type="submit" {% if not can_update %}disabled{% else %}disabled{% endif %}>Record status</button>
             {% if state %}
               <div class="pill dim">Last updated: {{ state.updated_at|humandt }}</div>
-              <div class="pill dim">Last score: {{ '%.2f'|format(state.last_score or 0) }}</div>
+              <div class="pill dim">Score at last update: {{ '%.2f'|format(state.last_score or 0) }}</div>
             {% endif %}
           </div>
+          {% if can_update %}
+            <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
+              Button enables when status or note changes.
+            </div>
+          {% endif %}
         </form>
         <script>
           (function() {
@@ -355,6 +396,11 @@
         <h2>Audit trail</h2>
         <p class="sub" style="margin-top:6px;">Events are stored append-only for this alert.</p>
         <p class="sub" style="margin-top:4px;">Events are shown in recorded order with stored status and note.</p>
+        {% if audit_allowed and total_events is defined and total_events > 0 %}
+          <div class="small" style="margin-top:8px; color:var(--muted);">
+            Showing {{ ((events_page - 1) * events_per_page) + 1 }} - {{ ((events_page - 1) * events_per_page) + (events|length) }} of {{ total_events }} events
+          </div>
+        {% endif %}
         <details style="margin-top:10px;">
           <summary style="cursor:pointer; font-weight:900;">Technical / audit details (stored)</summary>
           <div style="height:10px;"></div>
@@ -378,6 +424,27 @@
                 {% endfor %}
               </tbody>
             </table>
+
+            {% if total_pages is defined and total_pages > 1 %}
+              <div class="hr"></div>
+              <div class="row" style="margin-top:12px; align-items:center; gap:12px;">
+                {% if has_prev_page %}
+                  <a class="btn" href="?alert_id={{ alert_id }}{% if run_id %}&run_id={{ run_id }}{% endif %}{% if readonly %}&readonly=true{% endif %}&events_page={{ events_page - 1 }}">Previous</a>
+                {% else %}
+                  <button class="btn" disabled>Previous</button>
+                {% endif %}
+
+                <span class="small" style="color:var(--muted);">
+                  Page {{ events_page }} of {{ total_pages }}
+                </span>
+
+                {% if has_next_page %}
+                  <a class="btn" href="?alert_id={{ alert_id }}{% if run_id %}&run_id={{ run_id }}{% endif %}{% if readonly %}&readonly=true{% endif %}&events_page={{ events_page + 1 }}">Next</a>
+                {% else %}
+                  <button class="btn" disabled>Next</button>
+                {% endif %}
+              </div>
+            {% endif %}
           {% endif %}
         </details>
       </div>
