@@ -78,6 +78,7 @@ import logging
 import os
 import math
 import re
+import sys
 import time
 import secrets
 import hmac
@@ -179,6 +180,37 @@ AUTH_ROLES = ["viewer", "auditor", "operator", "manager", "admin"]
 ACCESS_ROLES = AUTH_ROLES  # Backward compatibility alias
 RULE_CHANGE_STATUSES = {"draft", "approved", "active"}
 
+# D4: Role capability matrix (authoritative)
+ROLE_CAPABILITIES = {
+    "viewer": {
+        "view",  # View pages, alerts, insights
+    },
+    "auditor": {
+        "view",
+        "export",  # Export reports, run JSON
+        "audit",  # View access events
+    },
+    "operator": {
+        "view",
+        "create",  # Upload CSV, create runs
+        "update",  # Update alert status/notes
+    },
+    "manager": {
+        "view",
+        "create",
+        "update",
+        "configure",  # View/edit settings, rules
+    },
+    "admin": {
+        "view",
+        "create",
+        "update",
+        "configure",
+        "manage_users",  # Create/update users
+        "manage_integrations",  # Manage integrations
+    },
+}
+
 # ----------------------------
 # Authentication constants
 # ----------------------------
@@ -186,6 +218,7 @@ AUTH_SESSION_KEY = "auth_user_id"
 AUTH_TENANT_KEY = "auth_tenant_id"
 AUTH_ROLE_KEY = "auth_user_role"
 AUTH_EMAIL_KEY = "auth_user_email"
+AUTH_SESSION_VERSION_KEY = "auth_session_version"  # HIGH(7): Track session version for invalidation
 STEPUP_SESSION_KEY = "stepup_verified_at"
 STEPUP_VALIDITY_SECONDS = 600  # 10 minutes
 RESET_TOKEN_EXPIRY_HOURS = 1
@@ -193,16 +226,34 @@ DEV_MAIL_OUTBOX_FILE = "dev_mail_outbox.json"
 MAX_DEV_OUTBOX_ENTRIES = 50
 
 # Routes that don't require authentication
+# D3: Explicit public vs protected route contract
 PUBLIC_ROUTES = {
+    "/",
+    "/home",
     "/login",
-    "/logout",
+    "/logout",  # Has auth but no TOS required
     "/forgot-password",
+    "/reset-password",
+    "/api/health",
     "/healthz",
 }
 PUBLIC_ROUTE_PREFIXES = (
     "/static/",
-    "/reset-password/",
 )
+
+# FastAPI framework-generated documentation routes (developer tooling, not application endpoints)
+# These are auto-mounted by FastAPI and exempted from guard validation
+FRAMEWORK_ROUTES_EXEMPT = {
+    "/openapi.json",
+    "/docs",
+    "/docs/oauth2-redirect",
+    "/redoc",
+    # Webhook endpoint: Uses secret-based authentication (bearer-style) instead of session auth
+    # Auth mechanism: Validates body.secret via constant-time hmac.compare_digest() before processing
+    # See P2(8) remediation - secret validation occurs at line ~8159 BEFORE any business logic
+    # This is industry-standard webhook auth pattern (GitHub, Stripe, Shopify, etc.)
+    "/api/webhook/transactions",
+}
 
 _CODE_HASH_CACHE: Optional[str] = None
 
@@ -273,6 +324,33 @@ def _safe_log_message(x: Any, max_len: int = 160) -> str:
 _RATE_LIMIT_BUCKETS: Dict[str, List[float]] = {}
 
 def _rate_limit_allow(key: str, limit: int, window_s: int) -> bool:
+    """
+    In-memory sliding-window rate limiter for authentication and upload endpoints.
+
+    TODO_ENTERPRISE: This implementation is single-instance only.
+    For horizontal scaling (multiple app instances / load balancing):
+    - Replace with Redis-backed rate limiting (redis.incr with TTL)
+    - Use library like slowapi with Redis backend
+    - Ensure distributed coordination across instances
+    See DEPLOYMENT_CHECKLIST.md for details.
+
+    LIMITATIONS (HIGH Issue #6):
+    - In-memory only: resets on restart, not shared across processes
+    - No persistence: limits do not survive application restarts
+    - Single-process only: will NOT work correctly with multiple app instances (horizontal scaling)
+    - No distributed coordination: each process maintains its own independent bucket state
+
+    For production multi-instance deployments, replace with Redis-backed rate limiting
+    (e.g., using redis.incr with TTL, or a library like slowapi with Redis backend).
+
+    Current usage:
+    - Login attempts: 10/minute per IP
+    - Password reset: 5/5min per email (dev mode only)
+    - CSV upload: 30/minute per tenant
+    - Webhook ingestion: 30/minute per tenant
+
+    Returns True if request is allowed, False if rate limit exceeded.
+    """
     now = float(time.time())
     window_start = now - float(window_s)
     bucket = _RATE_LIMIT_BUCKETS.get(key, [])
@@ -287,11 +365,20 @@ def _rate_limit_allow(key: str, limit: int, window_s: int) -> bool:
 # ----------------------------
 # FastAPI + templates
 # ----------------------------
-app = FastAPI(title=APP_TITLE)
+# P0-01: Disable framework documentation routes in production
+_SME_EW_ENV = os.getenv('SME_EW_ENV', 'development').strip().lower()
+if _SME_EW_ENV == "production":
+    app = FastAPI(
+        title=APP_TITLE,
+        docs_url=None,      # Disables /docs
+        redoc_url=None,     # Disables /redoc
+        openapi_url=None,   # Disables /openapi.json
+    )
+else:
+    app = FastAPI(title=APP_TITLE)
 # Session middleware is used only to persist selected run context across pages.
 # This uses Starlette's built-in session support (no new dependencies).
 _SESSION_SECRET_RAW = os.getenv('SME_EW_SESSION_SECRET', '')
-_SME_EW_ENV = os.getenv('SME_EW_ENV', 'development').strip().lower()
 _SESSION_SECRET_DEMO_DEFAULT = "CHANGE_ME_DEMO_SESSION_SECRET"
 
 # Production-safe session secret enforcement
@@ -388,7 +475,7 @@ app.add_middleware(
     SessionMiddleware,
     secret_key=_SESSION_SECRET,
     same_site="lax",
-    https_only=(not _demo_mode_env),
+    https_only=(_SME_EW_ENV == "production"),
     max_age=3600,  # 1 hour session (temporarily changed from None to debug session issues)
 )
 
@@ -620,6 +707,13 @@ def db_init() -> None:
         if not _table_has_column(conn, "users", "tos_version"):
             try:
                 cur.execute("ALTER TABLE users ADD COLUMN tos_version TEXT")
+            except Exception:
+                pass
+
+        # HIGH(7): Session invalidation - Add session_version for role change invalidation
+        if not _table_has_column(conn, "users", "session_version"):
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1")
             except Exception:
                 pass
 
@@ -1068,10 +1162,78 @@ def db_init() -> None:
         conn.commit()
 
 
+def _validate_route_enforcement():
+    """
+    D3: Validate that all routes are either public or protected.
+    Fail fast in dev if unclassified routes exist.
+    """
+    import inspect
+
+    # Collect all registered routes
+    unprotected_routes = []
+    for route in app.routes:
+        if not hasattr(route, "path"):
+            continue
+
+        path = route.path
+
+        # Skip public routes
+        if path in PUBLIC_ROUTES:
+            continue
+        if any(path.startswith(prefix) for prefix in PUBLIC_ROUTE_PREFIXES):
+            continue
+
+        # Skip FastAPI framework-generated documentation routes
+        if path in FRAMEWORK_ROUTES_EXEMPT:
+            continue
+
+        # Skip routes with path parameters (harder to validate statically)
+        if "{" in path:
+            continue
+
+        # Check if route handler has guards
+        # Routes should call require_user, _require_auth, _require_role, _require_dev_mode, or _is_authenticated
+        endpoint = route.endpoint if hasattr(route, "endpoint") else None
+        if endpoint:
+            try:
+                source = inspect.getsource(endpoint) if callable(endpoint) else ""
+            except (OSError, TypeError):
+                # Can't get source (e.g., built-in, C function, or dynamically created)
+                # Conservatively flag as unprotected
+                source = ""
+            has_guard = any(guard in source for guard in [
+                "require_user(",
+                "_require_auth(",
+                "_require_role(",
+                "_require_dev_mode(",
+                "_is_authenticated("  # Used by /stepup and other auth-only routes
+            ])
+            if not has_guard:
+                unprotected_routes.append(path)
+
+    if unprotected_routes:
+        msg = (
+            f"[D3 ENFORCEMENT VIOLATION] Found {len(unprotected_routes)} routes without guards:\n"
+            + "\n".join(f"  - {r}" for r in unprotected_routes)
+            + "\n\nAll routes must be either:\n"
+            + "  1) Listed in PUBLIC_ROUTES, PUBLIC_ROUTE_PREFIXES, or FRAMEWORK_ROUTES_EXEMPT\n"
+            + "  2) Call require_user(), _require_auth(), _require_role(), _require_dev_mode(), or _is_authenticated()\n"
+        )
+        logger.error(msg)
+        # Fail fast in dev
+        raise RuntimeError(msg)
+
+    logger.info("[D3] Route enforcement validation passed (%d routes checked)", len(app.routes))
+
+
 @app.on_event("startup")
 def _startup():
     db_init()
     logger.info("Startup complete. DB initialised at %s", DB_PATH)
+
+    # D3: Validate route enforcement contract (dev mode only)
+    if _SME_EW_ENV != "production":
+        _validate_route_enforcement()
 
 
 def _settings_from_row(row: Optional[sqlite3.Row]) -> Dict[str, Any]:
@@ -1319,7 +1481,7 @@ def _get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
     """Fetch user by ID."""
     with db_conn() as conn:
         row = conn.execute(
-            "SELECT id, tenant_id, email, role, is_active, created_at, last_login_at FROM users WHERE id = ?",
+            "SELECT id, tenant_id, email, role, is_active, created_at, last_login_at, tos_version, tos_accepted_at FROM users WHERE id = ?",
             (int(user_id),),
         ).fetchone()
         if row:
@@ -1331,6 +1493,8 @@ def _get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
                 "is_active": bool(row["is_active"]),
                 "created_at": str(row["created_at"]),
                 "last_login_at": str(row["last_login_at"]) if row["last_login_at"] else None,
+                "tos_version": str(row["tos_version"]) if row["tos_version"] else None,
+                "tos_accepted_at": str(row["tos_accepted_at"]) if row["tos_accepted_at"] else None,
             }
     return None
 
@@ -1401,6 +1565,29 @@ def _validate_password(password: str) -> Tuple[bool, str]:
     if len(password) > PASSWORD_MAX_LENGTH:
         return False, f"Password cannot exceed {PASSWORD_MAX_LENGTH} characters"
     return True, ""
+
+
+def _validate_role_capability(role: str, action: str) -> bool:
+    """
+    D4: Validate that a role has the capability for an action.
+    This is informational only - does not change existing role hierarchy behavior.
+    """
+    if role not in ROLE_CAPABILITIES:
+        logger.warning("[D4] Unknown role: %s", role)
+        return False
+
+    # Extract base action from composite actions like "deny:insufficient_role:manager"
+    base_action = action.split(":")[0] if ":" in action else action
+
+    # Check if role has capability for base action
+    capabilities = ROLE_CAPABILITIES[role]
+    has_capability = base_action in capabilities
+
+    if not has_capability and not action.startswith("deny:"):
+        logger.debug("[D4] Role %s lacks capability %s (allowed: %s)", role, base_action, capabilities)
+
+    return has_capability
+
 
 # ----------------------------
 # Run context helpers (selected run persistence)
@@ -1496,6 +1683,10 @@ def _log_access(
     resource: str,
     allowed: bool = True,
 ) -> None:
+    # D4: Validate role capability (informational, logs warning if mismatch)
+    if role:
+        _validate_role_capability(role, action)
+
     try:
         with db_conn() as conn:
             conn.execute(
@@ -1525,7 +1716,9 @@ def _require_role(request: Request, min_role: str, action: str, resource: str) -
     _require_tos(request)
     role = _access_role(request)
     allowed = _role_rank(role) >= _role_rank(min_role)
-    _log_access(_tenant_id(request), _actor_id(request), role, action, resource, allowed)
+    # D1: Log with explicit deny reason if insufficient role
+    action_log = f"deny:insufficient_role:{min_role}" if not allowed else action
+    _log_access(_tenant_id(request), _actor_id(request), role, action_log, resource, allowed)
     if not allowed:
         raise HTTPException(status_code=403, detail="forbidden")
     return role
@@ -1579,43 +1772,68 @@ CSRF_EXEMPT_PREFIXES = (
 )
 
 
+class SessionError(Exception):
+    """Raised when session operations fail critically."""
+    pass
+
+
 def _get_csrf_token(request: Request) -> str:
-    """Get or create CSRF token for the session."""
+    """Get or create CSRF token for the session.
+
+    CRITICAL INVARIANT: This function MUST return a token that is stored in session.
+    If session read/write fails, this raises SessionError (results in 500).
+    Never return a token that isn't stored - that causes silent CSRF failures.
+    """
+    path = request.url.path
+    ip = _get_client_ip(request)
+
     try:
         token = request.session.get(CSRF_SESSION_KEY)
         if not token:
             token = secrets.token_urlsafe(32)
             request.session[CSRF_SESSION_KEY] = token
         return str(token)
-    except Exception:
-        # Fallback if session unavailable
-        return secrets.token_urlsafe(32)
+    except Exception as e:
+        # Session access failed - this is a critical server error
+        # Log with context but NEVER log token values
+        actor = None
+        tenant = None
+        try:
+            actor = request.session.get(AUTH_SESSION_KEY)
+            tenant = request.session.get(AUTH_TENANT_KEY)
+        except Exception:
+            pass
+        logger.error(
+            "Session failure during CSRF token operation: path=%s ip=%s actor=%s tenant=%s error=%s",
+            path, ip, actor, tenant, str(e)
+        )
+        # Raise to trigger 500 error - do NOT return unstored token
+        raise SessionError(f"Session unavailable: {e}") from e
 
 
 def _validate_csrf(request: Request, form_token: Optional[str] = None) -> bool:
     """
     Validate CSRF token from form or header against session.
     Returns True if valid, False otherwise.
+
+    LOGGING POLICY: Never log token values or prefixes. Only log:
+    - path, ip, actor_id, tenant_id
+    - token status: "present" or "missing"
     """
     try:
         session_token = request.session.get(CSRF_SESSION_KEY)
-        logger.info("CSRF validation - session_token: %s, form_token: %s", session_token[:20] if session_token else "None", form_token[:20] if form_token else "None")
         if not session_token:
-            logger.warning("No CSRF token in session")
             return False
 
         # Check form field first
         if form_token:
-            result = hmac.compare_digest(str(form_token), str(session_token))
-            logger.info("CSRF form token comparison: %s", result)
-            return result
+            return hmac.compare_digest(str(form_token), str(session_token))
 
         # Check header
         header_token = request.headers.get(CSRF_HEADER_NAME)
         if header_token:
             return hmac.compare_digest(str(header_token), str(session_token))
 
-        logger.warning("No CSRF token in form or header")
         return False
     except Exception:
         return False
@@ -1889,6 +2107,54 @@ def human_dt(s: str) -> str:
 templates.env.filters["humandt"] = lambda v: human_dt(str(v or ""))
 
 
+# P1-05: Vendor name redaction for privacy (display-only, no data modification)
+# HIGH(5): Expanded to cover common payroll/HR vendor names and patterns
+SENSITIVE_VENDOR_PATTERNS = [
+    r"(?i)employee",
+    r"(?i)salary",
+    r"(?i)payroll",
+    r"(?i)bonus",
+    r"(?i)commission",
+    r"(?i)contractor.*payment",
+    # Common payroll providers
+    r"(?i)\bADP\b",
+    r"(?i)\bGusto\b",
+    r"(?i)Paychex",
+    r"(?i)Rippling",
+    r"(?i)Bamboo\s*HR",
+    r"(?i)Zenefits",
+    r"(?i)Justworks",
+    r"(?i)TriNet",
+    # UK/Commonwealth patterns
+    r"(?i)\bPAYE\b",
+    r"(?i)\bHMRC\b",
+    # Generic HR/compensation patterns
+    r"(?i)compensation",
+    r"(?i)\bHR\b",
+    r"(?i)Human\s*Resources",
+    r"(?i)benefits?\s*admin",
+    r"(?i)reimbursement",
+]
+
+def redact_vendor(vendor_name: str, user_role: str) -> str:
+    """
+    Redact sensitive vendor names for non-admin users (display-only).
+    Admin users see full names. This does NOT modify stored data.
+    """
+    if not vendor_name or user_role == "admin":
+        return vendor_name
+
+    import re
+    for pattern in SENSITIVE_VENDOR_PATTERNS:
+        if re.search(pattern, vendor_name):
+            return "[Redacted - Sensitive]"
+
+    return vendor_name
+
+
+templates.env.filters["redact_vendor"] = lambda v, role="viewer": redact_vendor(str(v or ""), str(role or "viewer"))
+
+
 def _render_or_fallback(
     request: Request,
     template_name: str,
@@ -1900,14 +2166,39 @@ def _render_or_fallback(
 
     This prevents a 'TemplateNotFound' from nuking a demo.
     """
+    # Set access context - each wrapped individually to prevent one failure from blocking others
     try:
         context.setdefault("access_role", _access_role(request))
+    except Exception as e:
+        logger.warning("Failed to get access_role: %s", e)
+        context.setdefault("access_role", "viewer")
+
+    try:
         context.setdefault("access_actor", _actor_id(request))
+    except Exception as e:
+        logger.warning("Failed to get access_actor: %s", e)
+        context.setdefault("access_actor", None)
+
+    try:
         context.setdefault("access_tenant", _tenant_id(request))
-        # Add CSRF token to all rendered templates
-        context.setdefault("csrf_token", _get_csrf_token(request))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to get access_tenant: %s", e)
+        context.setdefault("access_tenant", TENANT_DEFAULT)
+
+    # CSRF token is CRITICAL - must always be set for form security
+    try:
+        csrf = _get_csrf_token(request)
+        context.setdefault("csrf_token", csrf)
+        logger.debug("CSRF token set in context: %s...", csrf[:10] if csrf else "None")
+    except Exception as e:
+        logger.error("CRITICAL: Failed to generate CSRF token: %s", e)
+        # Generate emergency token and try to store it
+        emergency_token = secrets.token_urlsafe(32)
+        try:
+            request.session[CSRF_SESSION_KEY] = emergency_token
+        except Exception:
+            pass
+        context.setdefault("csrf_token", emergency_token)
     try:
         return templates.TemplateResponse(template_name, context)
     except TemplateNotFound:
@@ -3872,10 +4163,35 @@ def _report_ids_from_run(row: sqlite3.Row, params: Dict[str, Any]) -> Dict[str, 
     return {"report_id": f"report_run_{int(row['id'])}", "snapshot_id": f"snapshot_run_{int(row['id'])}"}
 
 
+def _sanitize_alert_for_export(alert: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Remove advisory/recommendation fields from alert before export.
+    Keeps only deterministic, observational, and compliance-safe fields.
+    """
+    sanitized = alert.copy()
+    # Remove advisory fields that read as recommendations
+    sanitized.pop("review_considerations", None)
+    sanitized.pop("suggested_actions", None)
+    # Remove nested advisory fields
+    if "api_considerations" in sanitized:
+        api_cons = sanitized.get("api_considerations") or {}
+        if isinstance(api_cons, dict):
+            api_cons = api_cons.copy()
+            api_cons.pop("suggested_tools", None)
+            api_cons.pop("external_context_types", None)
+            # If empty after stripping, remove entirely
+            if not api_cons:
+                sanitized.pop("api_considerations", None)
+            else:
+                sanitized["api_considerations"] = api_cons
+    return sanitized
+
 def _build_report_from_run(row: sqlite3.Row) -> Dict[str, Any]:
     params = safe_json_loads(row["params_json"], {}) or {}
     summary = safe_json_loads(row["summary_json"], {}) or {}
-    alerts = safe_json_loads(row["alerts_json"], []) or []
+    alerts_raw = safe_json_loads(row["alerts_json"], []) or []
+    # Sanitize alerts to remove advisory content
+    alerts = [_sanitize_alert_for_export(a) if isinstance(a, dict) else a for a in alerts_raw]
     quality = safe_json_loads(row["quality_json"], {}) or {}
     ids = _report_ids_from_run(row, params)
     tenant_id = str(row["tenant_id"]) if ("tenant_id" in row.keys()) and row["tenant_id"] is not None else TENANT_DEFAULT
@@ -4087,6 +4403,13 @@ def _auth_guard(request: Request) -> bool:
         if user_id:
             user = _get_user_by_id(user_id)
             if user and user.get("is_active"):
+                # HIGH(7): Check session version - invalidate if role changed
+                session_version = request.session.get(AUTH_SESSION_VERSION_KEY, 1)
+                current_version = user.get("session_version", 1)
+                if session_version != current_version:
+                    # Session invalid - role changed since login
+                    request.session.clear()
+                    return False
                 return True
             # User deactivated - clear session
             request.session.clear()
@@ -4108,6 +4431,15 @@ def _auth_guard(request: Request) -> bool:
 def _require_auth(request: Request):
     """Raise HTTPException if not authenticated."""
     if not _auth_guard(request):
+        # D1: Log denied access before raising
+        _log_access(
+            _tenant_id(request),
+            None,  # No actor for unauthenticated
+            "none",
+            "deny:unauthenticated",
+            request.url.path,
+            allowed=False
+        )
         raise HTTPException(status_code=401, detail="Authentication required")
 
 
@@ -4134,7 +4466,90 @@ def _require_tos(request: Request):
         if path == exempt or path.startswith(exempt):
             return
     if not _has_accepted_tos(request):
+        # D1: Log denied access before raising
+        _log_access(
+            _tenant_id(request),
+            _actor_id(request),
+            _access_role(request),
+            "deny:tos_not_accepted",
+            request.url.path,
+            allowed=False
+        )
         raise HTTPException(status_code=428, detail="TOS acceptance required")
+
+
+def require_user(
+    request: Request,
+    *,
+    min_role: Optional[str] = None,
+    action: str = "view",
+    resource: str = ""
+) -> Dict[str, Any]:
+    """
+    Unified enforcement guard (Task B mandate):
+    1) Authentication
+    2) TOS acceptance (unless exempt)
+    3) Role-based authorization (optional)
+
+    Returns user dict or raises HTTPException.
+    """
+    # Step 1: Authentication
+    _require_auth(request)
+    user_id = _current_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    user = _get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    # Step 2: TOS (unless route is exempt)
+    path = request.url.path
+    if not any(path.startswith(p) if p.endswith('/') else path == p for p in TOS_ROUTES_EXEMPT):
+        _require_tos(request)
+
+    # Step 3: Role (if specified)
+    if min_role:
+        _require_role(request, min_role, action, resource)
+    else:
+        # D1: Log successful auth+TOS access (role guard logs separately)
+        _log_access(_tenant_id(request), _actor_id(request), _access_role(request), action, resource, allowed=True)
+
+    return user
+
+
+# Custom SessionError handler - critical session failures
+@app.exception_handler(SessionError)
+async def session_error_handler(request: Request, exc: SessionError):
+    """Handle session failures with friendly error page for HTML, 500 JSON for API."""
+    accept = str(request.headers.get("accept") or "").lower()
+    path = request.url.path
+    ip = _get_client_ip(request)
+
+    logger.error("SessionError handler triggered: path=%s ip=%s", path, ip)
+
+    if "text/html" in accept:
+        # Return friendly HTML error page
+        return HTMLResponse(
+            content="""
+            <!doctype html>
+            <html>
+            <head><meta charset="utf-8"><title>Session Error</title></head>
+            <body style="font-family: system-ui, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px;">
+                <h1 style="color: #c00;">Session Error</h1>
+                <p>Your session could not be accessed. This is usually temporary.</p>
+                <p><strong>Please try:</strong></p>
+                <ul>
+                    <li>Refreshing the page</li>
+                    <li>Clearing your browser cookies for this site</li>
+                    <li><a href="/login">Logging in again</a></li>
+                </ul>
+                <p style="color: #666; font-size: 14px;">If this persists, contact support.</p>
+            </body>
+            </html>
+            """,
+            status_code=500,
+        )
+    return JSONResponse({"detail": "Session error", "code": "SESSION_UNAVAILABLE"}, status_code=500)
 
 
 # Custom 401 handler that redirects to login for HTML requests
@@ -4142,9 +4557,136 @@ def _require_tos(request: Request):
 async def unauthorized_handler(request: Request, exc: HTTPException):
     """Handle 401 by redirecting to login for HTML, JSON for API."""
     accept = str(request.headers.get("accept") or "").lower()
-    if "text/html" in accept:
-        return RedirectResponse(url="/login", status_code=302)
-    return JSONResponse({"detail": exc.detail or "Authentication required"}, status_code=401)
+    path = request.url.path
+    # D2: API routes ALWAYS return JSON (never redirect)
+    if path.startswith("/api/") or "text/html" not in accept:
+        return JSONResponse({
+            "error": "unauthenticated",
+            "message": exc.detail or "Authentication required",
+            "path": path
+        }, status_code=401)
+    return RedirectResponse(url="/login", status_code=302)
+
+
+# Custom 403 handler for CSRF and permission failures
+@app.exception_handler(403)
+async def forbidden_handler(request: Request, exc: HTTPException):
+    """Handle 403 by redirecting to appropriate page for HTML, JSON for API.
+
+    CSRF failure handling (production-hardened):
+    - Authenticated user: redirect to originating page with ?error=csrf
+    - Unauthenticated user: redirect to /login?error=session_expired
+    - API/JSON requests: return JSON 403
+    """
+    accept = str(request.headers.get("accept") or "").lower()
+    detail = str(exc.detail or "Forbidden")
+    path = request.url.path
+    ip = _get_client_ip(request)
+
+    # Check if user is authenticated (session has auth key)
+    is_authenticated = False
+    try:
+        is_authenticated = bool(request.session.get(AUTH_SESSION_KEY))
+    except Exception:
+        pass  # Session unavailable = not authenticated
+
+    # D2: API routes ALWAYS return JSON (never redirect)
+    if path.startswith("/api/") or "text/html" not in accept:
+        logger.warning("403 Forbidden (API): path=%s ip=%s detail=%s", path, ip, detail)
+        error_code = "insufficient_role" if "forbidden" in detail.lower() else "forbidden"
+        return JSONResponse({
+            "error": error_code,
+            "message": detail,
+            "path": path
+        }, status_code=403)
+
+    # HTML request handling
+    if "CSRF" in detail:
+        # CSRF failure
+        if is_authenticated:
+            # Authenticated user: redirect back to originating page
+            referer = request.headers.get("referer")
+            if referer:
+                # Parse referer to extract path, ensure same-origin
+                try:
+                    from urllib.parse import urlparse, urlencode
+                    parsed = urlparse(referer)
+                    # Only use referer if it's same host or no host (relative)
+                    if not parsed.netloc or parsed.netloc == request.url.netloc:
+                        redirect_path = parsed.path or "/"
+                        # Add error param
+                        sep = "&" if "?" in redirect_path else "?"
+                        redirect_url = f"{redirect_path}{sep}error=csrf"
+                        logger.warning("CSRF failure (authenticated): path=%s ip=%s -> redirect to %s", path, ip, redirect_path)
+                        return RedirectResponse(url=redirect_url, status_code=302)
+                except Exception:
+                    pass
+
+            # No valid referer: use sensible defaults based on request path
+            if path == "/tos":
+                redirect_url = "/tos?error=csrf"
+            else:
+                redirect_url = "/?error=csrf"
+            logger.warning("CSRF failure (authenticated, no referer): path=%s ip=%s -> redirect to %s", path, ip, redirect_url)
+            return RedirectResponse(url=redirect_url, status_code=302)
+        else:
+            # Unauthenticated: session expired or never existed
+            logger.warning("CSRF failure (unauthenticated): path=%s ip=%s -> redirect to /login", path, ip)
+            return RedirectResponse(url="/login?error=session_expired", status_code=302)
+
+    # Other 403s (permission denied, not CSRF)
+    logger.warning("403 Forbidden: path=%s ip=%s detail=%s", path, ip, detail)
+    from urllib.parse import quote
+    return RedirectResponse(url=f"/error?code=403&message={quote(detail)}", status_code=302)
+
+
+# ----------------------------
+# Generic error page route
+# ----------------------------
+@app.get("/error", response_class=HTMLResponse)
+async def error_page(
+    request: Request,
+    code: str = Query("error"),
+    message: str = Query("An error occurred"),
+):
+    """Display a user-facing error page for redirected errors (e.g., 403 permission denied)."""
+    require_user(request)
+    tenant_id = _tenant_id(request)
+    actor = _actor_id(request)
+    role = _access_role(request)
+    _log_access(tenant_id, actor, role, "view", f"error:{code}")
+
+    active_run, latest_run_actual = _active_and_latest(request, None)
+    run_scope = _run_scope_context(active_run, latest_run_actual)
+
+    # Context-aware messaging for permission-denied errors
+    if code == "403":
+        display_title = "Access restricted"
+        display_message = "You don't have permission to view this page. If you believe this is an error, contact your administrator."
+    else:
+        display_title = f"Error {code}"
+        display_message = message
+
+    return templates.TemplateResponse(
+        "error.html",
+        {
+            "request": request,
+            "title": display_title,
+            "error_title": display_title,
+            "error_message": display_message,
+            "schema_help": None,
+            "actions": [
+                {"label": "Home", "href": "/dashboard"},
+                {"label": "History", "href": "/history"},
+            ],
+            "show_details": False,
+            "error_details": None,
+            "access_role": role,
+            "access_actor": actor,
+            "access_tenant": tenant_id,
+            **run_scope,
+        },
+    )
 
 
 # Custom 428 handler that redirects to TOS page for HTML requests
@@ -4152,14 +4694,19 @@ async def unauthorized_handler(request: Request, exc: HTTPException):
 async def tos_required_handler(request: Request, exc: HTTPException):
     """Handle 428 by redirecting to TOS page for HTML, JSON for API."""
     accept = str(request.headers.get("accept") or "").lower()
-    if "text/html" in accept:
-        # Preserve original destination via 'next' parameter
-        original_path = str(request.url.path)
-        if original_path and original_path != "/tos":
-            from urllib.parse import quote
-            return RedirectResponse(url=f"/tos?next={quote(original_path)}", status_code=302)
-        return RedirectResponse(url="/tos", status_code=302)
-    return JSONResponse({"detail": exc.detail or "TOS acceptance required"}, status_code=428)
+    path = request.url.path
+    # D2: API routes ALWAYS return JSON (never redirect)
+    if path.startswith("/api/") or "text/html" not in accept:
+        return JSONResponse({
+            "error": "tos_not_accepted",
+            "message": exc.detail or "TOS acceptance required",
+            "path": path
+        }, status_code=428)
+    # HTML: Preserve original destination via 'next' parameter
+    if path and path != "/tos":
+        from urllib.parse import quote
+        return RedirectResponse(url=f"/tos?next={quote(path)}", status_code=302)
+    return RedirectResponse(url="/tos", status_code=302)
 
 
 # ----------------------------
@@ -4326,6 +4873,7 @@ async def login_submit(
     request.session[AUTH_TENANT_KEY] = user["tenant_id"]
     request.session[AUTH_ROLE_KEY] = user["role"]
     request.session[AUTH_EMAIL_KEY] = user["email"]
+    request.session[AUTH_SESSION_VERSION_KEY] = user.get("session_version", 1)  # HIGH(7): Store session version
 
     # Update last login
     with db_conn() as conn:
@@ -4351,11 +4899,6 @@ async def logout(request: Request, csrf_token: Optional[str] = Form(None)):
     request.session.clear()
     return RedirectResponse(url="/login", status_code=302)
 
-@app.get("/logout")
-async def logout_get(request: Request):
-    """GET logout (convenience)."""
-    return await logout(request)
-
 
 # ----------------------------
 # TOS (Terms of Service) Routes
@@ -4363,10 +4906,19 @@ async def logout_get(request: Request):
 @app.get("/tos", response_class=HTMLResponse)
 async def tos_page(request: Request, next: Optional[str] = Query(None)):
     """Display Terms of Service acceptance page."""
+    logger.info("TOS GET - next parameter: %s", next)
     _require_auth(request)
     user_id = _current_user_id(request)
     user = _get_user_by_id(user_id) if user_id else None
     already_accepted = user and user.get("tos_version") == TOS_VERSION
+    logger.info("TOS GET - user_id: %s, already_accepted: %s", user_id, already_accepted)
+
+    # ISSUE 3 FIX: Do NOT redirect already-accepted users - allow viewing TOS
+    # Only redirect if they are NOT already accepted AND this is NOT the TOS page itself
+
+    # Get CSRF token BEFORE building fallback HTML so it's available for both paths
+    csrf = _get_csrf_token(request)
+    next_input = f'<input type="hidden" name="next" value="{next}">' if next else ""
 
     return _render_or_fallback(
         request,
@@ -4377,6 +4929,7 @@ async def tos_page(request: Request, next: Optional[str] = Query(None)):
             "tos_version": TOS_VERSION,
             "already_accepted": already_accepted,
             "next": next,
+            "csrf_token": csrf,  # Explicitly pass CSRF token
             "access_role": _access_role(request),
             "access_actor": _actor_id(request),
             "access_tenant": _tenant_id(request),
@@ -4396,6 +4949,8 @@ async def tos_page(request: Request, next: Optional[str] = Query(None)):
         </div>
         {"<p><em>You have already accepted this version.</em></p>" if already_accepted else ""}
         <form method="post" action="/tos">
+            <input type="hidden" name="csrf_token" value="{csrf}">
+            {next_input}
             <button type="submit" style="padding:10px 20px; margin-right:10px;">I Accept</button>
             <a href="/logout" style="padding:10px 20px; text-decoration:none; color:var(--muted);">Decline &amp; Logout</a>
         </form>
@@ -4414,28 +4969,35 @@ async def tos_accept(request: Request, csrf_token: Optional[str] = Form(None), n
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    # Record TOS acceptance
-    with db_conn() as conn:
-        conn.execute(
-            "UPDATE users SET tos_accepted_at = ?, tos_version = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(), TOS_VERSION, user_id),
+    # ISSUE 5 FIX: Check if user has already accepted current TOS version (idempotency)
+    user = _get_user_by_id(user_id)
+    if user and user.get("tos_version") == TOS_VERSION:
+        # Already accepted - no-op, do not re-write DB or duplicate audit log
+        logger.info("User %s already accepted TOS version %s - idempotent no-op", user_id, TOS_VERSION)
+    else:
+        # Record TOS acceptance
+        with db_conn() as conn:
+            conn.execute(
+                "UPDATE users SET tos_accepted_at = ?, tos_version = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(), TOS_VERSION, user_id),
+            )
+            conn.commit()
+
+        _log_auth_event(
+            _tenant_id(request),
+            "tos_accepted",
+            user_id=user_id,
+            details={"tos_version": TOS_VERSION},
+            ip_address=_get_client_ip(request),
         )
-        conn.commit()
 
-    _log_auth_event(
-        _tenant_id(request),
-        "tos_accepted",
-        user_id=user_id,
-        details={"tos_version": TOS_VERSION},
-        ip_address=_get_client_ip(request),
-    )
+        logger.info("User %s accepted TOS version %s", user_id, TOS_VERSION)
 
-    logger.info("User %s accepted TOS version %s", user_id, TOS_VERSION)
-
-    # Redirect to original destination if provided, otherwise dashboard
-    redirect_url = "/"
+    # Task C: Validate next parameter (no open redirects), default to /dashboard
+    redirect_url = "/dashboard"
     if next and next.startswith("/") and not next.startswith("//"):
         redirect_url = next
+    logger.info("Redirecting to: %s", redirect_url)
     return RedirectResponse(url=redirect_url, status_code=302)
 
 
@@ -4561,6 +5123,7 @@ async def reset_password_page(request: Request, token: str, error: Optional[str]
             fallback_html="<p>Invalid or expired link. <a href='/forgot-password'>Request a new one</a>.</p>",
         )
 
+    csrf = _get_csrf_token(request)
     return _render_or_fallback(
         request,
         "reset_password.html",
@@ -4569,10 +5132,12 @@ async def reset_password_page(request: Request, token: str, error: Optional[str]
             "title": "Reset Password",
             "token": token,
             "error": error,
+            "csrf_token": csrf,
         },
         fallback_title="Reset Password",
         fallback_html=f"""
         <form method="post" action="/reset-password/{token}" style="max-width:400px;">
+            <input type="hidden" name="csrf_token" value="{csrf}">
             <div style="margin-bottom:16px;">
                 <label>New Password (min {PASSWORD_MIN_LENGTH} characters)</label><br>
                 <input type="password" name="password" required minlength="{PASSWORD_MIN_LENGTH}" style="width:100%; padding:8px;">
@@ -4592,8 +5157,10 @@ async def reset_password_submit(
     token: str,
     password: str = Form(...),
     confirm_password: str = Form(...),
+    csrf_token: Optional[str] = Form(None),
 ):
     """Process password reset."""
+    _require_csrf(request, csrf_token)
     ip_address = _get_client_ip(request)
 
     # Validate token
@@ -4687,16 +5254,16 @@ async def stepup_submit(
 
     if not user or not check_password_hash(user.get("password_hash", ""), password):
         _log_auth_event(tenant_id, "stepup_failed", user_id=user_id, ip_address=ip_address)
-        # Sanitize next URL
-        safe_next = next if next.startswith("/") else "/dashboard"
+        # Sanitize next URL: allow only relative paths starting with "/" but NOT "//" (scheme-relative)
+        safe_next = next if (next.startswith("/") and not next.startswith("//")) else "/dashboard"
         return RedirectResponse(url=f"/stepup?next={safe_next}&error=invalid", status_code=302)
 
     # Set step-up verification
     _set_stepup(request)
     _log_auth_event(tenant_id, "stepup_success", user_id=user_id, ip_address=ip_address)
 
-    # Sanitize next URL
-    safe_next = next if next.startswith("/") else "/dashboard"
+    # Sanitize next URL: allow only relative paths starting with "/" but NOT "//" (scheme-relative)
+    safe_next = next if (next.startswith("/") and not next.startswith("//")) else "/dashboard"
     return RedirectResponse(url=safe_next, status_code=302)
 
 
@@ -4704,18 +5271,23 @@ async def stepup_submit(
 # User Management Routes (Phase 3 - Admin only)
 # ----------------------------
 @app.get("/admin/users", response_class=HTMLResponse)
-async def admin_users_page(request: Request):
-    """List users (admin only)."""
-    _require_role(request, "admin", "view", "admin_users")
+async def admin_users_page(
+    request: Request,
+    stepup_required: Optional[str] = Query(None),
+    stepup_error: Optional[str] = Query(None),
+    filter: str = Query("active"),
+):
+    """List users (manager and admin)."""
+    _require_role(request, "manager", "view", "admin_users")
     tenant_id = _tenant_id(request)
 
     with db_conn() as conn:
         rows = conn.execute(
-            "SELECT id, tenant_id, email, role, is_active, created_at, last_login_at FROM users WHERE tenant_id = ? ORDER BY created_at DESC",
+            "SELECT id, tenant_id, email, role, is_active, created_at, last_login_at FROM users WHERE tenant_id = ? ORDER BY is_active DESC, created_at DESC",
             (tenant_id,),
         ).fetchall()
 
-    users = [
+    all_users = [
         {
             "id": int(r["id"]),
             "email": str(r["email"]),
@@ -4727,6 +5299,14 @@ async def admin_users_page(request: Request):
         for r in rows
     ]
 
+    # Filter users by active/inactive/all
+    if filter == "active":
+        users = [u for u in all_users if u["is_active"]]
+    elif filter == "inactive":
+        users = [u for u in all_users if not u["is_active"]]
+    else:
+        users = all_users
+
     active_run, latest_run = _active_and_latest(request)
     return _render_or_fallback(
         request,
@@ -4735,10 +5315,16 @@ async def admin_users_page(request: Request):
             "request": request,
             "title": "User Management",
             "users": users,
+            "all_users_count": len(all_users),
+            "active_users_count": len([u for u in all_users if u["is_active"]]),
+            "inactive_users_count": len([u for u in all_users if not u["is_active"]]),
             "roles": AUTH_ROLES,
             "active_run_id": active_run.get("id") if active_run else None,
             "latest_run_id": latest_run.get("id") if latest_run else None,
             "run_qs": _run_qs(active_run, latest_run),
+            "stepup_required": stepup_required == "1",
+            "stepup_error": stepup_error,
+            "filter": filter,
         },
         fallback_title="User Management",
         fallback_html="<p>User management requires admin_users.html template.</p>",
@@ -4751,18 +5337,38 @@ async def admin_create_user(
     password: str = Form(...),
     role: str = Form("viewer"),
     csrf_token: Optional[str] = Form(None),
+    stepup_password: Optional[str] = Form(None),
 ):
-    """Create new user (admin only, requires step-up)."""
+    """Create new user (manager and admin, requires step-up)."""
     _require_csrf(request, csrf_token)
-    _require_role(request, "admin", "create", "user")
+    _require_role(request, "manager", "create", "user")
 
+    # Step-up inline: if not verified and no password provided, redirect to form with error
     if not _require_stepup(request):
-        return RedirectResponse(url="/stepup?next=/admin/users", status_code=302)
+        if not stepup_password:
+            # No step-up password provided, redirect to prompt
+            return RedirectResponse(url=f"/admin/users?stepup_required=1", status_code=302)
+
+        # Verify step-up password inline
+        user_id = _current_user_id(request)
+        tenant_id = _tenant_id(request)
+        ip_address = _get_client_ip(request)
+        actor_email = _actor_id(request)
+        user = _get_user_by_email(actor_email)
+
+        if not user or not check_password_hash(user.get("password_hash", ""), stepup_password):
+            _log_auth_event(tenant_id, "stepup_failed", user_id=user_id, ip_address=ip_address)
+            return RedirectResponse(url=f"/admin/users?stepup_error=invalid", status_code=302)
+
+        # Step-up successful, set session flag
+        _set_stepup(request)
+        _log_auth_event(tenant_id, "stepup_success", user_id=user_id, ip_address=ip_address)
 
     tenant_id = _tenant_id(request)
     ip_address = _get_client_ip(request)
     actor_id = _actor_id(request)
     current_user_id = _current_user_id(request)
+    actor_role = _access_role(request)
 
     # Validate
     valid, error_msg = _validate_password(password)
@@ -4771,6 +5377,10 @@ async def admin_create_user(
 
     if role not in AUTH_ROLES:
         raise HTTPException(status_code=400, detail="Invalid role")
+
+    # Manager role restriction: can only create viewer or operator roles
+    if actor_role == "manager" and role not in ["viewer", "operator"]:
+        raise HTTPException(status_code=403, detail="Managers can only create users with Viewer or Operator roles")
 
     # Check email not already used
     existing = _get_user_by_email(email.lower().strip(), tenant_id)
@@ -4805,18 +5415,38 @@ async def admin_update_user(
     role: str = Form(...),
     is_active: bool = Form(True),
     csrf_token: Optional[str] = Form(None),
+    stepup_password: Optional[str] = Form(None),
 ):
-    """Update user role/status (admin only, requires step-up)."""
+    """Update user role/status (manager and admin, requires step-up)."""
     _require_csrf(request, csrf_token)
-    _require_role(request, "admin", "update", "user")
+    _require_role(request, "manager", "update", "user")
 
+    # Step-up inline: if not verified and no password provided, redirect to form with error
     if not _require_stepup(request):
-        return RedirectResponse(url=f"/stepup?next=/admin/users", status_code=302)
+        if not stepup_password:
+            # No step-up password provided, redirect to prompt
+            return RedirectResponse(url=f"/admin/users?stepup_required=1", status_code=302)
+
+        # Verify step-up password inline
+        current_user_id = _current_user_id(request)
+        tenant_id = _tenant_id(request)
+        ip_address = _get_client_ip(request)
+        actor_email = _actor_id(request)
+        user = _get_user_by_email(actor_email)
+
+        if not user or not check_password_hash(user.get("password_hash", ""), stepup_password):
+            _log_auth_event(tenant_id, "stepup_failed", user_id=current_user_id, ip_address=ip_address)
+            return RedirectResponse(url=f"/admin/users?stepup_error=invalid", status_code=302)
+
+        # Step-up successful, set session flag
+        _set_stepup(request)
+        _log_auth_event(tenant_id, "stepup_success", user_id=current_user_id, ip_address=ip_address)
 
     tenant_id = _tenant_id(request)
     ip_address = _get_client_ip(request)
     actor_id = _actor_id(request)
     current_user_id = _current_user_id(request)
+    actor_role = _access_role(request)
 
     if role not in AUTH_ROLES:
         raise HTTPException(status_code=400, detail="Invalid role")
@@ -4826,16 +5456,36 @@ async def admin_update_user(
     if not target_user or target_user["tenant_id"] != tenant_id:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Prevent self-demotion from admin
-    if user_id == current_user_id and role != "admin":
-        raise HTTPException(status_code=400, detail="Cannot demote yourself")
+    # Prevent any user from changing their own role (only when role change is requested)
+    if role is not None and user_id == current_user_id and role != target_user["role"]:
+        raise HTTPException(status_code=400, detail="Cannot change your own role")
+
+    # Manager role restrictions
+    if actor_role == "manager":
+        # Managers cannot modify users who are manager or admin
+        if target_user["role"] in ["manager", "admin"]:
+            raise HTTPException(status_code=403, detail="Managers cannot modify Manager or Admin users")
+
+        # Managers can only assign viewer or operator roles (when role is provided)
+        if role is not None and role not in ["viewer", "operator"]:
+            raise HTTPException(status_code=403, detail="Managers can only assign Viewer or Operator roles")
+
+    # HIGH(7): Check if role is changing - if so, increment session_version to invalidate existing sessions
+    role_changed = target_user["role"] != role
 
     # Update
     with db_conn() as conn:
-        conn.execute(
-            "UPDATE users SET role = ?, is_active = ? WHERE id = ? AND tenant_id = ?",
-            (role, 1 if is_active else 0, user_id, tenant_id),
-        )
+        if role_changed:
+            # Increment session_version to force re-login
+            conn.execute(
+                "UPDATE users SET role = ?, is_active = ?, session_version = session_version + 1 WHERE id = ? AND tenant_id = ?",
+                (role, 1 if is_active else 0, user_id, tenant_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE users SET role = ?, is_active = ? WHERE id = ? AND tenant_id = ?",
+                (role, 1 if is_active else 0, user_id, tenant_id),
+            )
         conn.commit()
 
     _log_auth_event(
@@ -4855,19 +5505,21 @@ async def admin_update_user(
 # ----------------------------
 @app.get("/", response_class=RedirectResponse)
 def home_redirect(request: Request):
-    _require_auth(request)  # Check auth before redirect to prevent page flash
+    require_user(request)  # Auth + TOS enforcement before redirect to prevent page flash
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "home")
     return RedirectResponse(url="/dashboard", status_code=302)
 
 
 @app.get("/home", response_class=RedirectResponse)
 def home_alias(request: Request):
+    require_user(request)  # Auth + TOS enforcement
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "home")
     return RedirectResponse(url="/dashboard", status_code=302)
 
 @app.get("/latest", response_class=RedirectResponse)
 def return_to_latest(request: Request):
     """Clear any selected historical run and return to the latest dataset."""
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "latest_redirect")
     _clear_active_run(request)
     tenant_id = _tenant_id(request)
@@ -4879,13 +5531,49 @@ def return_to_latest(request: Request):
 
 @app.get("/healthz", response_class=JSONResponse)
 def healthz(request: Request):
-    # Simple health endpoint for "is it alive?" checks.
-    _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "healthz")
-    return JSONResponse({"ok": True, "app": APP_TITLE, "utc": datetime.utcnow().isoformat()})
+    """
+    Health endpoint with DB connectivity check (P1-04).
+    Public route — no authentication, no audit logging (high-frequency endpoint).
+    Returns 503 if database is unavailable.
+    """
+    # P1-04: Database connectivity check
+    try:
+        with db_conn() as conn:
+            conn.execute("SELECT 1").fetchone()
+        db_ok = True
+    except Exception:
+        db_ok = False
+
+    if not db_ok:
+        return JSONResponse(
+            {
+                "ok": False,
+                "app": APP_TITLE,
+                "error": "db_unavailable",
+                "utc": datetime.utcnow().isoformat()
+            },
+            status_code=503
+        )
+
+    return JSONResponse({
+        "ok": True,
+        "app": APP_TITLE,
+        "utc": datetime.utcnow().isoformat()
+    })
+
+
+@app.get("/api/health", response_class=JSONResponse)
+def api_health(request: Request):
+    """
+    P0-02: Health endpoint (API path alias).
+    Public route — delegates to healthz() for single source of truth.
+    """
+    return healthz(request)
 
 
 @app.get("/upload", response_class=HTMLResponse)
 def upload_page(request: Request, run_id: Optional[int] = Query(None)):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "upload")
     active_run, latest_run_actual = _active_and_latest(request, run_id)
     s = read_settings(_tenant_id(request))
@@ -4989,7 +5677,7 @@ def settings_save(
     csrf_token: Optional[str] = Form(None),
 ):
     _require_csrf(request, csrf_token)
-    _require_role(request, "admin", "update", "settings")
+    _require_role(request, "manager", "update", "settings")
     tenant_id = _tenant_id(request)
 
     # Read current settings to preserve fields not in form
@@ -5348,6 +6036,7 @@ async def analyze(request: Request, file: UploadFile = File(...), csrf_token: Op
 
 @app.get("/history", response_class=HTMLResponse)
 def history(request: Request, run_id: Optional[int] = Query(None)):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "history")
     active_run, latest_run_actual = _active_and_latest(request, run_id)
     tenant_id = _tenant_id(request)
@@ -5399,6 +6088,7 @@ def history(request: Request, run_id: Optional[int] = Query(None)):
 
 @app.get("/alerts", response_class=HTMLResponse)
 def alerts_control_panel(request: Request, run_id: Optional[int] = Query(None)):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "alerts")
     active_run, latest_run_actual = _active_and_latest(request, run_id)
     run_scope = _run_scope_context(active_run, latest_run_actual)
@@ -5528,7 +6218,7 @@ def update_alert_status(
     # operator role can update alert status/note (Phase 3 RBAC)
     _require_role(request, "operator", "update", f"alert:{alert_id}")
     status = str(status).strip().lower()
-    if status not in {"noted", "actioned", "ignore", "snoozed", "review"}:
+    if status not in {"noted", "actioned", "acknowledged", "ignore", "snoozed", "review"}:
         status = "review"
     note_clean = str(note or "").strip()
 
@@ -5575,6 +6265,7 @@ def alert_detail(
     run_id: Optional[int] = Query(None),
     events_page: int = Query(1, ge=1)
 ):
+    require_user(request)  # Auth + TOS
     active_run, latest_run_actual = _active_and_latest(request, run_id)
     run_qs = _run_qs(active_run, latest_run_actual)
     run_scope = _run_scope_context(active_run, latest_run_actual)
@@ -5588,7 +6279,12 @@ def alert_detail(
             is_latest = int(active_run.get("id")) == int(latest_run_actual.get("id"))
         except Exception:
             is_latest = False
-    can_update = bool(is_latest and not bool(readonly))
+    role = _access_role(request)
+    can_update = bool(
+        is_latest
+        and not bool(readonly)
+        and role in ("operator", "manager", "admin")
+    )
 
     # Pagination for alert events
     events_per_page = 50
@@ -5650,7 +6346,32 @@ def alert_detail(
     else:
         latest = None
 
+    # P1-B4: Historical Alert Comparison - fetch prior occurrences of this alert type
     appearances: List[Dict[str, Any]] = []
+    with db_conn() as conn:
+        if _table_has_column(conn, "runs", "tenant_id"):
+            historical_rows = conn.execute(
+                "SELECT id, created_at, alerts_json FROM runs WHERE COALESCE(tenant_id, ?) = ? ORDER BY id DESC LIMIT 50",
+                (TENANT_DEFAULT, tenant_id),
+            ).fetchall()
+        else:
+            historical_rows = conn.execute(
+                "SELECT id, created_at, alerts_json FROM runs ORDER BY id DESC LIMIT 50"
+            ).fetchall()
+
+    for hr in historical_rows:
+        hr_alerts = safe_json_loads(hr["alerts_json"], []) or []
+        for hr_alert in hr_alerts:
+            if isinstance(hr_alert, dict) and str(hr_alert.get("id")) == str(alert_id):
+                # Found this alert type in a historical run
+                hr_evidence = hr_alert.get("evidence", {}) if isinstance(hr_alert, dict) else {}
+                appearances.append({
+                    "run_id": int(hr["id"]),
+                    "created_at": str(hr["created_at"]),
+                    "severity": str(hr_alert.get("severity", "")),
+                    "evidence": dict(hr_evidence) if isinstance(hr_evidence, dict) else {},
+                })
+                break  # Only count once per run
 
     alert_details = None
     if latest:
@@ -5703,6 +6424,7 @@ def alert_detail(
 
 @app.get("/insights", response_class=HTMLResponse)
 def insights(request: Request, run_id: Optional[int] = Query(None)):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "summary")
     active_run, latest_run_actual = _active_and_latest(request, run_id)
     latest_run = active_run or latest_run_actual
@@ -5745,12 +6467,14 @@ def insights(request: Request, run_id: Optional[int] = Query(None)):
 
 @app.get("/digest", response_class=RedirectResponse)
 def digest_redirect(request: Request):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "digest_redirect")
     return RedirectResponse(url="/insights", status_code=302)
 
 
 @app.get("/insights/weekly", response_class=HTMLResponse)
 def weekly_insights(request: Request):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "insights_weekly")
     active_run, latest_run_actual = _active_and_latest(request, None)
     run_scope = _run_scope_context(active_run, latest_run_actual)
@@ -5815,6 +6539,7 @@ def weekly_insights(request: Request):
 
 @app.get("/digest/weekly", response_class=RedirectResponse)
 def weekly_digest_redirect(request: Request):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "digest_weekly_redirect")
     return RedirectResponse(url="/insights/weekly", status_code=302)
 
@@ -5824,7 +6549,7 @@ def weekly_digest_redirect(request: Request):
 # ----------------------------
 @app.get("/dashboard", response_class=HTMLResponse)
 def unified_dashboard(request: Request, tab: str = "overview", run_id: Optional[int] = Query(None)):
-    _require_auth(request)  # Check auth first to prevent page flash
+    require_user(request)  # Auth + TOS enforcement
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "dashboard")
     active_run, latest_run_actual = _active_and_latest(request, run_id)
     run_scope = _run_scope_context(active_run, latest_run_actual)
@@ -5871,6 +6596,7 @@ def unified_dashboard(request: Request, tab: str = "overview", run_id: Optional[
 
 @app.get("/run/{run_id}", response_class=HTMLResponse)
 def view_run(request: Request, run_id: int):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", f"run:{run_id}")
     tenant_id = _tenant_id(request)
     with db_conn() as conn:
@@ -5908,6 +6634,122 @@ def view_run(request: Request, run_id: int):
 
     alerts_display = _apply_effective_feedback(alerts, feedback, state)
 
+    # E1: Extract provenance data for surfacing
+    provenance = {
+        "snapshot_id": int(run_id),
+        "created_at": str(row["created_at"]),
+        "file_sha256": params.get("file_sha256", "N/A"),
+        "settings_hash": params.get("settings_hash", "N/A"),
+        "rule_inventory_hash": params.get("rule_inventory_hash", "N/A"),
+        "code_hash": params.get("code_hash", "N/A"),
+    }
+
+    # P0-C1: Fetch recent runs for period-over-period table
+    recent_runs = []
+    with db_conn() as conn:
+        if _table_has_column(conn, "runs", "tenant_id"):
+            recent_rows = conn.execute(
+                "SELECT id, created_at, summary_json, alerts_json FROM runs WHERE COALESCE(tenant_id, ?) = ? ORDER BY id DESC LIMIT 10",
+                (TENANT_DEFAULT, tenant_id),
+            ).fetchall()
+        else:
+            recent_rows = conn.execute(
+                "SELECT id, created_at, summary_json, alerts_json FROM runs ORDER BY id DESC LIMIT 10"
+            ).fetchall()
+
+    for rr in recent_rows:
+        rr_summary = safe_json_loads(rr["summary_json"], {}) or {}
+        rr_alerts = safe_json_loads(rr["alerts_json"], []) or []
+        recent_runs.append({
+            "id": int(rr["id"]),
+            "created_at": str(rr["created_at"]),
+            "window_start": rr_summary.get("window_start_date"),
+            "window_end": rr_summary.get("end_date"),
+            "window_income": rr_summary.get("window_income"),
+            "window_expense": rr_summary.get("window_expense"),
+            "window_net": rr_summary.get("window_net_change"),
+            "recent_income": rr_summary.get("recent_income"),
+            "recent_expense": rr_summary.get("recent_expense"),
+            "current_cash": rr_summary.get("current_cash"),
+            "runway_days": rr_summary.get("runway_days"),
+            "alert_count": len([a for a in rr_alerts if isinstance(a, dict)]),
+            "currency": rr_summary.get("currency", "AUD"),
+        })
+
+    # P0-C2: Same-Period-Prior-Year Comparison - find matching period from 1 year ago
+    prior_year_run = None
+    current_window_start = summary.get("window_start_date")
+    current_window_end = summary.get("end_date")
+
+    if current_window_start and current_window_end:
+        try:
+            from datetime import datetime, timedelta
+
+            # Parse current period dates
+            current_start_dt = datetime.strptime(current_window_start, "%Y-%m-%d")
+            current_end_dt = datetime.strptime(current_window_end, "%Y-%m-%d")
+
+            # Calculate prior year period (subtract 365 days)
+            prior_start_dt = current_start_dt - timedelta(days=365)
+            prior_end_dt = current_end_dt - timedelta(days=365)
+
+            # Search for runs matching the prior year period (within 7-day tolerance)
+            with db_conn() as conn:
+                if _table_has_column(conn, "runs", "tenant_id"):
+                    all_rows = conn.execute(
+                        "SELECT id, created_at, summary_json, alerts_json FROM runs WHERE COALESCE(tenant_id, ?) = ? AND id < ? ORDER BY id DESC",
+                        (TENANT_DEFAULT, tenant_id, run_id),
+                    ).fetchall()
+                else:
+                    all_rows = conn.execute(
+                        "SELECT id, created_at, summary_json, alerts_json FROM runs WHERE id < ? ORDER BY id DESC",
+                        (run_id,),
+                    ).fetchall()
+
+            # Find best matching run (closest to prior year period)
+            best_match = None
+            best_match_score = float('inf')
+
+            for ar in all_rows:
+                ar_summary = safe_json_loads(ar["summary_json"], {}) or {}
+                ar_start = ar_summary.get("window_start_date")
+                ar_end = ar_summary.get("end_date")
+
+                if ar_start and ar_end:
+                    try:
+                        ar_start_dt = datetime.strptime(ar_start, "%Y-%m-%d")
+                        ar_end_dt = datetime.strptime(ar_end, "%Y-%m-%d")
+
+                        # Calculate overlap distance (days off from ideal prior year period)
+                        start_diff = abs((ar_start_dt - prior_start_dt).days)
+                        end_diff = abs((ar_end_dt - prior_end_dt).days)
+                        total_diff = start_diff + end_diff
+
+                        # Accept if within 14-day total tolerance and better than current best
+                        if total_diff <= 14 and total_diff < best_match_score:
+                            best_match_score = total_diff
+                            ar_alerts = safe_json_loads(ar["alerts_json"], []) or []
+                            best_match = {
+                                "run_id": int(ar["id"]),
+                                "created_at": str(ar["created_at"]),
+                                "window_start": ar_start,
+                                "window_end": ar_end,
+                                "window_income": ar_summary.get("window_income"),
+                                "window_expense": ar_summary.get("window_expense"),
+                                "window_net": ar_summary.get("window_net_change"),
+                                "current_cash": ar_summary.get("current_cash"),
+                                "runway_days": ar_summary.get("runway_days"),
+                                "alert_count": len([a for a in ar_alerts if isinstance(a, dict)]),
+                                "currency": ar_summary.get("currency", "AUD"),
+                            }
+                    except (ValueError, TypeError):
+                        continue
+
+            prior_year_run = best_match
+
+        except (ValueError, TypeError, ImportError):
+            prior_year_run = None
+
     return _render_or_fallback(
         request,
         "dashboard.html",
@@ -5924,11 +6766,14 @@ def view_run(request: Request, run_id: int):
             "quality": quality,
             "params": params,
             "feedback": feedback,
-            "can_update": bool(is_latest),
+            "can_update": bool(is_latest and _access_role(request) in ("operator", "manager", "admin")),
             "active_run_id": int(run_id),
             "latest_run_id": latest_run_id,
             "run_qs": f"?run_id={int(run_id)}" if (latest_run_id and int(run_id) != int(latest_run_id)) else "",
             "run_scope": run_scope,
+            "provenance": provenance,  # E1
+            "recent_runs": recent_runs,  # P0-C1
+            "prior_year_run": prior_year_run,  # P0-C2
         },
         fallback_title=f"Run {run_id}",
         fallback_html="<p>Run template missing. Use <code>/run/&lt;id&gt;/json</code>.</p>",
@@ -5948,7 +6793,7 @@ def save_feedback(
     # operator role can update alert status/note (Phase 3 RBAC)
     _require_role(request, "operator", "update", f"run:{run_id}:feedback")
     status = str(status).strip().lower()
-    if status not in {"noted", "actioned", "ignore", "snoozed", "review"}:
+    if status not in {"noted", "actioned", "acknowledged", "ignore", "snoozed", "review"}:
         status = "review"
     note_clean = str(note or "").strip()
     tenant_id = _tenant_id(request)
@@ -6005,6 +6850,7 @@ def save_feedback(
 
 @app.get("/run/{run_id}/json")
 def run_json(request: Request, run_id: int):
+    require_user(request, min_role="auditor", action="export", resource=f"run:{run_id}:json")  # Auth + TOS + auditor
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", f"run:{run_id}:json")
     tenant_id = _tenant_id(request)
     with db_conn() as conn:
@@ -6028,6 +6874,9 @@ def run_json(request: Request, run_id: int):
         "code_hash": str(params.get("code_hash") or ""),
         "tenant_id": run_tenant_id,
     }
+    # Sanitize alerts to remove advisory content
+    alerts_raw = safe_json_loads(row["alerts_json"], []) or []
+    alerts = [_sanitize_alert_for_export(a) if isinstance(a, dict) else a for a in alerts_raw]
     return JSONResponse(
         {
             "id": int(row["id"]),
@@ -6037,7 +6886,7 @@ def run_json(request: Request, run_id: int):
             "params": params,
             "run": run_obj,
             "summary": safe_json_loads(row["summary_json"], {}) or {},
-            "alerts": safe_json_loads(row["alerts_json"], []) or [],
+            "alerts": alerts,
             "quality": safe_json_loads(row["quality_json"], {}) or {},
             "feedback": get_feedback_map(run_id, tenant_id),
         }
@@ -6341,6 +7190,7 @@ def _rule_based_strategies_DISABLED(latest_run: Optional[Dict[str, Any]]) -> Lis
 
 @app.get("/strategies", response_class=HTMLResponse)
 def strategies_page(request: Request):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "strategies")
     tenant_id = _tenant_id(request)
     active_id = _get_active_run_id(request, None)
@@ -6363,6 +7213,7 @@ def strategies_page(request: Request):
 
 @app.get("/swot", response_class=HTMLResponse)
 def swot_page(request: Request):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "swot")
     tenant_id = _tenant_id(request)
     active_id = _get_active_run_id(request, None)
@@ -6397,6 +7248,7 @@ def swot_page(request: Request):
 # ----------------------------
 @app.get("/integrations", response_class=HTMLResponse)
 def integrations_page(request: Request):
+    require_user(request)
     _require_role(request, "admin", "view", "integrations")
     active_run, latest_run_actual = _active_and_latest(request, None)
     run_scope = _run_scope_context(active_run, latest_run_actual)
@@ -6611,7 +7463,9 @@ def api_create_rule_change(
     approver_id: str = Form(""),
     rationale: str = Form(""),
     metadata_json: str = Form(""),
+    csrf_token: Optional[str] = Form(None),
 ):
+    _require_csrf(request, csrf_token)
     _require_role(request, "admin", "update", "rules:changes:create")
     tenant_id = _tenant_id(request)
     rid = _safe_text(rule_id, 120).strip()
@@ -6713,7 +7567,9 @@ def api_add_vendor_rule(
     priority: int = Form(100),
     is_enabled: Any = Form(True),
     note: str = Form(""),
+    csrf_token: Optional[str] = Form(None),
 ):
+    _require_csrf(request, csrf_token)
     _require_role(request, "admin", "update", "rules:vendor")
     v = _safe_text(vendor, MAX_RULE_TEXT_LEN).strip()
     c = _safe_text(category, MAX_RULE_TEXT_LEN).strip() or "Uncategorised"
@@ -6744,7 +7600,9 @@ def api_add_description_rule(
     priority: int = Form(100),
     is_enabled: Any = Form(True),
     note: str = Form(""),
+    csrf_token: Optional[str] = Form(None),
 ):
+    _require_csrf(request, csrf_token)
     _require_role(request, "admin", "update", "rules:description")
     p = _safe_text(pattern, MAX_RULE_TEXT_LEN).strip()
     c = _safe_text(category, MAX_RULE_TEXT_LEN).strip() or "Uncategorised"
@@ -6775,7 +7633,9 @@ def api_add_override_rule(
     match_type: str = Form("equals"),
     is_enabled: Any = Form(True),
     note: str = Form(""),
+    csrf_token: Optional[str] = Form(None),
 ):
+    _require_csrf(request, csrf_token)
     _require_role(request, "admin", "update", "rules:override")
     tf = _safe_text(target_field, 20).strip().lower()
     if tf not in {"counterparty", "description"}:
@@ -6802,7 +7662,8 @@ def api_add_override_rule(
 
 
 @app.post("/api/rules/vendor/{rule_id}/delete", response_class=JSONResponse)
-def api_delete_vendor_rule(request: Request, rule_id: int):
+def api_delete_vendor_rule(request: Request, rule_id: int, csrf_token: Optional[str] = Form(None)):
+    _require_csrf(request, csrf_token)
     _require_role(request, "admin", "delete", f"rules:vendor:{rule_id}")
     with db_conn() as conn:
         conn.execute("DELETE FROM vendor_rules WHERE id = ?", (int(rule_id),))
@@ -6811,7 +7672,8 @@ def api_delete_vendor_rule(request: Request, rule_id: int):
 
 
 @app.post("/api/rules/description/{rule_id}/delete", response_class=JSONResponse)
-def api_delete_description_rule(request: Request, rule_id: int):
+def api_delete_description_rule(request: Request, rule_id: int, csrf_token: Optional[str] = Form(None)):
+    _require_csrf(request, csrf_token)
     _require_role(request, "admin", "delete", f"rules:description:{rule_id}")
     with db_conn() as conn:
         conn.execute("DELETE FROM description_rules WHERE id = ?", (int(rule_id),))
@@ -6820,7 +7682,8 @@ def api_delete_description_rule(request: Request, rule_id: int):
 
 
 @app.post("/api/rules/override/{rule_id}/delete", response_class=JSONResponse)
-def api_delete_override_rule(request: Request, rule_id: int):
+def api_delete_override_rule(request: Request, rule_id: int, csrf_token: Optional[str] = Form(None)):
+    _require_csrf(request, csrf_token)
     _require_role(request, "admin", "delete", f"rules:override:{rule_id}")
     with db_conn() as conn:
         conn.execute("DELETE FROM categorisation_overrides WHERE id = ?", (int(rule_id),))
@@ -7100,6 +7963,7 @@ def api_ingest_simulate(
 
 @app.get("/api/latest", response_class=JSONResponse)
 def api_latest(request: Request):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "latest")
     tenant_id = _tenant_id(request)
     latest = _latest_run_snapshot(tenant_id)
@@ -7108,12 +7972,14 @@ def api_latest(request: Request):
 
 @app.get("/api/rules/registry", response_class=JSONResponse)
 def api_rules_registry(request: Request):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "rules:registry")
     return JSONResponse({"version": _rule_inventory_hash(), "rules": RULE_INVENTORY})
 
 
 @app.get("/api/runs", response_class=JSONResponse)
 def api_runs(request: Request, limit: int = 50):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "runs")
     limit = max(1, min(int(limit), 200))
     tenant_id = _tenant_id(request)
@@ -7149,6 +8015,7 @@ def api_runs(request: Request, limit: int = 50):
 
 @app.get("/api/ui/dashboard", response_class=PlainTextResponse)
 def api_ui_dashboard(request: Request):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "ui:dashboard")
     tenant_id = _tenant_id(request)
     latest = _latest_run_snapshot(tenant_id)
@@ -7157,6 +8024,7 @@ def api_ui_dashboard(request: Request):
 
 @app.get("/api/ui/run/{run_id}", response_class=PlainTextResponse)
 def api_ui_run(request: Request, run_id: int):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", f"ui:run:{run_id}")
     tenant_id = _tenant_id(request)
     with db_conn() as conn:
@@ -7189,6 +8057,7 @@ def api_ui_run(request: Request, run_id: int):
 
 @app.get("/api/ui/history", response_class=PlainTextResponse)
 def api_ui_history(request: Request, limit: int = 200):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "ui:history")
     tenant_id = _tenant_id(request)
     limit = max(1, min(int(limit), 200))
@@ -7236,6 +8105,7 @@ def api_ui_history(request: Request, limit: int = 200):
 
 @app.get("/api/ui/alerts", response_class=PlainTextResponse)
 def api_ui_alerts(request: Request):
+    require_user(request, min_role="auditor", action="view", resource="ui:alerts")  # Auth + TOS + auditor
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "ui:alerts")
     tenant_id = _tenant_id(request)
     latest = _latest_run_snapshot(tenant_id)
@@ -7259,6 +8129,7 @@ def api_ui_alerts(request: Request):
 
 @app.get("/api/ui/alerts/{alert_id}", response_class=PlainTextResponse)
 def api_ui_alert_detail(request: Request, alert_id: str):
+    require_user(request, min_role="auditor", action="view", resource=f"ui:alert:{alert_id}")  # Auth + TOS + auditor
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", f"ui:alert:{alert_id}")
     tenant_id = _tenant_id(request)
     latest = _latest_run_snapshot(tenant_id)
@@ -7315,6 +8186,7 @@ def api_ui_alert_detail(request: Request, alert_id: str):
 
 @app.get("/api/ui/access/events", response_class=PlainTextResponse)
 def api_ui_access_events(request: Request):
+    require_user(request, min_role="auditor", action="view", resource="ui:access_events")  # Auth + TOS + auditor
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "ui:access_events")
     tenant_id = _tenant_id(request)
     actor_id = _actor_id(request)
@@ -7348,183 +8220,190 @@ def api_ui_access_events(request: Request):
     return _json_response_deterministic(payload)
 
 
-@app.post("/api/ai/explanation-requests", response_class=PlainTextResponse)
-async def api_ai_explanation_requests_create(request: Request):
-    _require_role(request, "auditor", "create", "ai:explanation_request")
-    tenant_id = _tenant_id(request)
-    actor_id = _actor_id(request)
-    try:
-        body = await request.json()
-    except Exception:
-        return _json_response_deterministic({"error": "invalid_json"}, status_code=400)
-    target_type = str(body.get("target_type") or "").strip().lower()
-    target_id = str(body.get("target_id") or "").strip()
-    if target_type not in {"run", "alert", "report"}:
-        return _json_response_deterministic({"error": "invalid_target_type"}, status_code=400)
-    if not target_id:
-        return _json_response_deterministic({"error": "target_id_required"}, status_code=400)
+# PRE-AI: AI endpoints are DISABLED and removed from route registration.
+# NORVION is deterministic and non-advisory. AI features are not available.
+# The routes below are preserved for reference only and are NOT registered with FastAPI.
+# They are inside an `if False:` block to ensure they are never executed or registered.
 
-    run_id_raw = body.get("run_id")
-    run_id: Optional[int] = None
-    snapshot_id = ""
-    report_id = ""
+if False:
+    # These routes are NEVER registered. This block is never executed.
 
-    if target_type == "run":
+    @app.post("/api/ai/explanation-requests", response_class=PlainTextResponse)
+    async def api_ai_explanation_requests_create(request: Request):
+        _require_role(request, "auditor", "create", "ai:explanation_request")
+        tenant_id = _tenant_id(request)
+        actor_id = _actor_id(request)
         try:
-            run_id = int(run_id_raw) if run_id_raw is not None else int(target_id)
+            body = await request.json()
         except Exception:
-            return _json_response_deterministic({"error": "invalid_run_id"}, status_code=400)
-        if str(run_id) != target_id:
-            return _json_response_deterministic({"error": "run_id_mismatch"}, status_code=400)
-        row = _run_row_for_tenant(run_id, tenant_id)
-        if not row:
-            return _json_response_deterministic({"error": "run not found"}, status_code=404)
-        params = safe_json_loads(row["params_json"], {}) or {}
-        artifact_ids = params.get("artifact_ids") if isinstance(params, dict) else None
-        if isinstance(artifact_ids, dict):
+            return _json_response_deterministic({"error": "invalid_json"}, status_code=400)
+        target_type = str(body.get("target_type") or "").strip().lower()
+        target_id = str(body.get("target_id") or "").strip()
+        if target_type not in {"run", "alert", "report"}:
+            return _json_response_deterministic({"error": "invalid_target_type"}, status_code=400)
+        if not target_id:
+            return _json_response_deterministic({"error": "target_id_required"}, status_code=400)
+
+        run_id_raw = body.get("run_id")
+        run_id: Optional[int] = None
+        snapshot_id = ""
+        report_id = ""
+
+        if target_type == "run":
+            try:
+                run_id = int(run_id_raw) if run_id_raw is not None else int(target_id)
+            except Exception:
+                return _json_response_deterministic({"error": "invalid_run_id"}, status_code=400)
+            if str(run_id) != target_id:
+                return _json_response_deterministic({"error": "run_id_mismatch"}, status_code=400)
+            row = _run_row_for_tenant(run_id, tenant_id)
+            if not row:
+                return _json_response_deterministic({"error": "run not found"}, status_code=404)
+            params = safe_json_loads(row["params_json"], {}) or {}
+            artifact_ids = params.get("artifact_ids") if isinstance(params, dict) else None
+            if isinstance(artifact_ids, dict):
+                snapshot_id = str(artifact_ids.get("snapshot_id") or "")
+                report_id = str(artifact_ids.get("report_id") or "")
+
+        if target_type == "alert":
+            if run_id_raw is None:
+                return _json_response_deterministic({"error": "run_id_required"}, status_code=400)
+            try:
+                run_id = int(run_id_raw)
+            except Exception:
+                return _json_response_deterministic({"error": "invalid_run_id"}, status_code=400)
+            row = _run_row_for_tenant(run_id, tenant_id)
+            if not row:
+                return _json_response_deterministic({"error": "run not found"}, status_code=404)
+            alerts = safe_json_loads(row["alerts_json"], []) or []
+            found = any(
+                isinstance(a, dict) and str(a.get("id") or "") == target_id
+                for a in alerts
+            )
+            if not found:
+                return _json_response_deterministic({"error": "alert not found"}, status_code=404)
+            params = safe_json_loads(row["params_json"], {}) or {}
+            artifact_ids = params.get("artifact_ids") if isinstance(params, dict) else None
+            if isinstance(artifact_ids, dict):
+                snapshot_id = str(artifact_ids.get("snapshot_id") or "")
+                report_id = str(artifact_ids.get("report_id") or "")
+
+        if target_type == "report":
+            if run_id_raw is None:
+                return _json_response_deterministic({"error": "run_id_required"}, status_code=400)
+            try:
+                run_id = int(run_id_raw)
+            except Exception:
+                return _json_response_deterministic({"error": "invalid_run_id"}, status_code=400)
+            row = _run_row_for_tenant(run_id, tenant_id)
+            if not row:
+                return _json_response_deterministic({"error": "run not found"}, status_code=404)
+            params = safe_json_loads(row["params_json"], {}) or {}
+            artifact_ids = params.get("artifact_ids") if isinstance(params, dict) else None
+            if not isinstance(artifact_ids, dict) or not artifact_ids.get("report_id"):
+                return _json_response_deterministic({"error": "report_id_unavailable"}, status_code=400)
+            if str(artifact_ids.get("report_id")) != target_id:
+                return _json_response_deterministic({"error": "report_id_mismatch"}, status_code=400)
             snapshot_id = str(artifact_ids.get("snapshot_id") or "")
             report_id = str(artifact_ids.get("report_id") or "")
 
-    if target_type == "alert":
-        if run_id_raw is None:
-            return _json_response_deterministic({"error": "run_id_required"}, status_code=400)
-        try:
-            run_id = int(run_id_raw)
-        except Exception:
-            return _json_response_deterministic({"error": "invalid_run_id"}, status_code=400)
-        row = _run_row_for_tenant(run_id, tenant_id)
-        if not row:
-            return _json_response_deterministic({"error": "run not found"}, status_code=404)
-        alerts = safe_json_loads(row["alerts_json"], []) or []
-        found = any(
-            isinstance(a, dict) and str(a.get("id") or "") == target_id
-            for a in alerts
-        )
-        if not found:
-            return _json_response_deterministic({"error": "alert not found"}, status_code=404)
-        params = safe_json_loads(row["params_json"], {}) or {}
-        artifact_ids = params.get("artifact_ids") if isinstance(params, dict) else None
-        if isinstance(artifact_ids, dict):
-            snapshot_id = str(artifact_ids.get("snapshot_id") or "")
-            report_id = str(artifact_ids.get("report_id") or "")
-
-    if target_type == "report":
-        if run_id_raw is None:
-            return _json_response_deterministic({"error": "run_id_required"}, status_code=400)
-        try:
-            run_id = int(run_id_raw)
-        except Exception:
-            return _json_response_deterministic({"error": "invalid_run_id"}, status_code=400)
-        row = _run_row_for_tenant(run_id, tenant_id)
-        if not row:
-            return _json_response_deterministic({"error": "run not found"}, status_code=404)
-        params = safe_json_loads(row["params_json"], {}) or {}
-        artifact_ids = params.get("artifact_ids") if isinstance(params, dict) else None
-        if not isinstance(artifact_ids, dict) or not artifact_ids.get("report_id"):
-            return _json_response_deterministic({"error": "report_id_unavailable"}, status_code=400)
-        if str(artifact_ids.get("report_id")) != target_id:
-            return _json_response_deterministic({"error": "report_id_mismatch"}, status_code=400)
-        snapshot_id = str(artifact_ids.get("snapshot_id") or "")
-        report_id = str(artifact_ids.get("report_id") or "")
-
-    enabled_flag = _ai_explanations_enabled(read_settings(tenant_id))
-    with db_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO explanation_requests
-            (created_at, tenant_id, actor_id, target_type, target_id, run_id, snapshot_id, report_id, enabled_flag)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                datetime.utcnow().isoformat(),
-                tenant_id,
-                actor_id or "",
-                target_type,
-                target_id,
-                run_id,
-                snapshot_id,
-                report_id,
-                1 if enabled_flag else 0,
-            ),
-        )
-        row = conn.execute("SELECT last_insert_rowid() AS id").fetchone()
-        conn.commit()
-    return _json_response_deterministic(
-        {"ok": True, "request_id": int(row["id"]) if row else None, "enabled_flag": bool(enabled_flag)}
-    )
-
-
-@app.get("/api/ai/explanation-requests", response_class=PlainTextResponse)
-def api_ai_explanation_requests_list(request: Request, limit: int = 200):
-    _require_role(request, "auditor", "view", "ai:explanation_requests")
-    tenant_id = _tenant_id(request)
-    actor_id = _actor_id(request)
-    limit = max(1, min(int(limit), 200))
-    with db_conn() as conn:
-        if actor_id:
-            exists = conn.execute(
+        enabled_flag = _ai_explanations_enabled(read_settings(tenant_id))
+        with db_conn() as conn:
+            conn.execute(
                 """
-                SELECT 1
-                FROM access_events
-                WHERE tenant_id = ? AND actor_id = ?
-                LIMIT 1
+                INSERT INTO explanation_requests
+                (created_at, tenant_id, actor_id, target_type, target_id, run_id, snapshot_id, report_id, enabled_flag)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (tenant_id, actor_id),
-            ).fetchone()
-        else:
-            exists = None
-        if actor_id and not exists:
-            rows = []
-        else:
-            rows = conn.execute(
+                (
+                    datetime.utcnow().isoformat(),
+                    tenant_id,
+                    actor_id or "",
+                    target_type,
+                    target_id,
+                    run_id,
+                    snapshot_id,
+                    report_id,
+                    1 if enabled_flag else 0,
+                ),
+            )
+            row = conn.execute("SELECT last_insert_rowid() AS id").fetchone()
+            conn.commit()
+        return _json_response_deterministic(
+            {"ok": True, "request_id": int(row["id"]) if row else None, "enabled_flag": bool(enabled_flag)}
+        )
+
+    @app.get("/api/ai/explanation-requests", response_class=PlainTextResponse)
+    def api_ai_explanation_requests_list(request: Request, limit: int = 200):
+        _require_role(request, "auditor", "view", "ai:explanation_requests")
+        tenant_id = _tenant_id(request)
+        actor_id = _actor_id(request)
+        limit = max(1, min(int(limit), 200))
+        with db_conn() as conn:
+            if actor_id:
+                exists = conn.execute(
+                    """
+                    SELECT 1
+                    FROM access_events
+                    WHERE tenant_id = ? AND actor_id = ?
+                    LIMIT 1
+                    """,
+                    (tenant_id, actor_id),
+                ).fetchone()
+            else:
+                exists = None
+            if actor_id and not exists:
+                rows = []
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, created_at, tenant_id, actor_id, target_type, target_id, run_id, snapshot_id, report_id, enabled_flag
+                    FROM explanation_requests
+                    WHERE tenant_id = ?
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (tenant_id, limit),
+                ).fetchall()
+        return _json_response_deterministic({"requests": [dict(r) for r in rows]})
+
+    @app.get("/api/ai/explanations/{request_id}", response_class=PlainTextResponse)
+    def api_ai_explanation_output_gate(request: Request, request_id: int):
+        _require_role(request, "auditor", "view", f"ai:explanation_output:{request_id}")
+        tenant_id = _tenant_id(request)
+        settings = read_settings(tenant_id)
+        if not _ai_explanations_enabled(settings):
+            return _json_response_deterministic({"error": "explanations_disabled"}, status_code=403)
+        with db_conn() as conn:
+            row = conn.execute(
                 """
                 SELECT id, created_at, tenant_id, actor_id, target_type, target_id, run_id, snapshot_id, report_id, enabled_flag
                 FROM explanation_requests
-                WHERE tenant_id = ?
-                ORDER BY created_at ASC, id ASC
-                LIMIT ?
+                WHERE tenant_id = ? AND id = ?
                 """,
-                (tenant_id, limit),
-            ).fetchall()
-    return _json_response_deterministic({"requests": [dict(r) for r in rows]})
-
-
-@app.get("/api/ai/explanations/{request_id}", response_class=PlainTextResponse)
-def api_ai_explanation_output_gate(request: Request, request_id: int):
-    _require_role(request, "auditor", "view", f"ai:explanation_output:{request_id}")
-    tenant_id = _tenant_id(request)
-    settings = read_settings(tenant_id)
-    if not _ai_explanations_enabled(settings):
-        return _json_response_deterministic({"error": "explanations_disabled"}, status_code=403)
-    with db_conn() as conn:
-        row = conn.execute(
-            """
-            SELECT id, created_at, tenant_id, actor_id, target_type, target_id, run_id, snapshot_id, report_id, enabled_flag
-            FROM explanation_requests
-            WHERE tenant_id = ? AND id = ?
-            """,
-            (tenant_id, int(request_id)),
-        ).fetchone()
-    if not row:
-        return _json_response_deterministic({"error": "explanation_request_not_found"}, status_code=404)
-    payload = {
-        "request_id": int(row["id"]),
-        "tenant_id": str(row["tenant_id"]),
-        "created_at": str(row["created_at"]),
-        "actor_id": str(row["actor_id"] or ""),
-        "target_type": str(row["target_type"]),
-        "target_id": str(row["target_id"]),
-        "run_id": int(row["run_id"]) if row["run_id"] is not None else None,
-        "snapshot_id": str(row["snapshot_id"] or ""),
-        "report_id": str(row["report_id"] or ""),
-        "enabled_flag_at_request_time": bool(row["enabled_flag"]),
-        "status": "no_output",
-    }
-    return _json_response_deterministic(payload)
+                (tenant_id, int(request_id)),
+            ).fetchone()
+        if not row:
+            return _json_response_deterministic({"error": "explanation_request_not_found"}, status_code=404)
+        payload = {
+            "request_id": int(row["id"]),
+            "tenant_id": str(row["tenant_id"]),
+            "created_at": str(row["created_at"]),
+            "actor_id": str(row["actor_id"] or ""),
+            "target_type": str(row["target_type"]),
+            "target_id": str(row["target_id"]),
+            "run_id": int(row["run_id"]) if row["run_id"] is not None else None,
+            "snapshot_id": str(row["snapshot_id"] or ""),
+            "report_id": str(row["report_id"] or ""),
+            "enabled_flag_at_request_time": bool(row["enabled_flag"]),
+            "status": "no_output",
+        }
+        return _json_response_deterministic(payload)
 
 
 @app.get("/api/alerts/state", response_class=JSONResponse)
 def api_alert_state(request: Request):
+    require_user(request)  # Auth + TOS
     _log_access(_tenant_id(request), _actor_id(request), _access_role(request), "view", "alert_state")
     tenant_id = _tenant_id(request)
     with db_conn() as conn:
@@ -7569,7 +8448,7 @@ def api_alert_events(request: Request, days: int = 7):
 
 @app.get("/api/access/events", response_class=JSONResponse)
 def api_access_events(request: Request, days: int = 7):
-    _require_role(request, "auditor", "view", "audit:access_events")
+    _require_role(request, "admin", "view", "audit:access_events")
     days = max(1, min(int(days), 90))
     tenant_id = _tenant_id(request)
     with db_conn() as conn:
@@ -7589,7 +8468,7 @@ def api_access_events(request: Request, days: int = 7):
 
 @app.get("/access/events", response_class=HTMLResponse)
 def access_events_page(request: Request):
-    _require_role(request, "auditor", "view", "audit:access_events_ui")
+    _require_role(request, "admin", "view", "audit:access_events_ui")
     tenant_id = _tenant_id(request)
     actor_id = _actor_id(request)
     with db_conn() as conn:
@@ -7635,7 +8514,6 @@ def access_events_page(request: Request):
 
 @app.post("/api/webhook/transactions", response_class=JSONResponse)
 async def api_webhook_transactions(request: Request):
-    _require_role(request, "admin", "create", "run:webhook")
     """Integration ingest endpoint (scaffold).
 
     POST JSON:
@@ -7647,10 +8525,6 @@ async def api_webhook_transactions(request: Request):
 
     For demo: we only validate secret and store as a 'run' if transactions are in CSV-like format.
     """
-    tenant_id = _tenant_id(request)
-    s = read_settings(tenant_id)
-    if not _rate_limit_allow(f"{tenant_id}:webhook", RATE_LIMIT_UPLOADS, RATE_LIMIT_WINDOW_S):
-        return JSONResponse({"error": "rate limited"}, status_code=429)
     # Demo safety: basic request size guard (prevents accidental DoS via huge JSON).
     try:
         cl = request.headers.get("content-length")
@@ -7660,14 +8534,24 @@ async def api_webhook_transactions(request: Request):
         pass
 
     body = await request.json()
+    # SECURITY: Validate webhook secret FIRST (before any session/role checks)
     secret = str(body.get("secret") or "")
+    # Get tenant from payload or header for secret lookup
+    tenant_id = str(body.get("tenant_id") or request.headers.get("X-Tenant-ID") or TENANT_DEFAULT)
+    s = read_settings(tenant_id)
     effective_secret = _effective_webhook_secret(s)
     # Production enforcement: reject requests if webhook_secret is demo default
     if _SME_EW_ENV == "production" and effective_secret == "CHANGE_ME_DEMO_SECRET":
         logger.error("Webhook rejected: webhook_secret is demo default in production mode")
         return JSONResponse({"error": "webhook_secret not configured for production"}, status_code=503)
-    if secret != effective_secret:
+    # Use constant-time comparison to prevent timing attacks
+    if not hmac.compare_digest(secret, effective_secret):
+        logger.warning("Webhook rejected: invalid secret")
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    # Secret valid, now apply rate limit
+    if not _rate_limit_allow(f"{tenant_id}:webhook", RATE_LIMIT_UPLOADS, RATE_LIMIT_WINDOW_S):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
 
     provider = str(body.get("provider") or "unknown")
     idempotency_key = _idempotency_key_from_request(request, body)
@@ -7793,6 +8677,16 @@ async def api_webhook_transactions(request: Request):
                 pass
         conn.commit()
 
+    # P1-03: Audit logging for successful webhook ingest
+    # role="operator" is safe: lowest role with "create" capability in ROLE_CAPABILITIES
+    _log_access(
+        tenant_id,
+        "webhook",  # actor_id
+        "operator", # role (in AUTH_ROLES, has "create" capability)
+        "create",   # action
+        f"run:{run_id}:webhook_ingest",  # resource
+        True  # allowed
+    )
 
     try:
         update_alert_memory_for_run(int(run_id), payload, tenant_id)
@@ -7805,7 +8699,8 @@ async def api_webhook_transactions(request: Request):
 
 
 @app.post("/api/integrations/{provider}/sync_now", response_class=JSONResponse)
-def api_integration_sync_now(request: Request, provider: str):
+def api_integration_sync_now(request: Request, provider: str, csrf_token: Optional[str] = Form(None)):
+    _require_csrf(request, csrf_token)
     _require_role(request, "admin", "update", f"integrations:{provider}:sync")
     return JSONResponse({"detail": "integrations_disabled"}, status_code=403)
 

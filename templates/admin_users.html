@@ -7,6 +7,22 @@
     </div>
   </div>
 
+  {% if stepup_required %}
+    <div class="card" style="background:#fefce8; border-left:4px solid #eab308; margin-bottom:16px;">
+      <div class="card-b" style="padding:12px 16px;">
+        <strong>Step-up authentication required.</strong> Please enter your password below to create or modify users.
+      </div>
+    </div>
+  {% endif %}
+
+  {% if stepup_error %}
+    <div class="card" style="background:#fef2f2; border-left:4px solid #ef4444; margin-bottom:16px;">
+      <div class="card-b" style="padding:12px 16px;">
+        <strong>Authentication failed.</strong> Incorrect password. Please try again.
+      </div>
+    </div>
+  {% endif %}
+
   <div class="card">
     <div class="card-b">
       <h2>Create User</h2>
@@ -14,6 +30,7 @@
       <div class="hr"></div>
 
       <form method="post" action="/admin/users/create" style="max-width:500px;">
+        {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
         <div class="field" style="margin-bottom:16px;">
           <label style="font-weight:700; margin-bottom:6px; display:block;">Email</label>
           <input type="email" name="email" required style="width:100%; padding:10px; border:1px solid var(--border); border-radius:var(--radius-sm);">
@@ -30,6 +47,13 @@
             {% endfor %}
           </select>
         </div>
+        {% if stepup_required or stepup_error %}
+        <div class="field" style="margin-bottom:16px; padding:12px; background:#fefce8; border-radius:var(--radius-sm);">
+          <label style="font-weight:700; margin-bottom:6px; display:block;">Your Password (for verification)</label>
+          <input type="password" name="stepup_password" required style="width:100%; padding:10px; border:1px solid var(--border); border-radius:var(--radius-sm);">
+          <div class="small" style="color:var(--muted); margin-top:4px;">Enter your current password to authorize this action.</div>
+        </div>
+        {% endif %}
         <button type="submit" class="btn btn-primary">Create User</button>
       </form>
     </div>
@@ -40,7 +64,14 @@
   <div class="card">
     <div class="card-b">
       <h2>Users</h2>
-      <p class="sub" style="margin-top:6px;">{{ users|length }} user(s) in this tenant.</p>
+      <div class="row" style="margin-top:6px; justify-content:space-between; align-items:center;">
+        <p class="sub">{{ users|length }} user(s) shown ({{ active_users_count }} active, {{ inactive_users_count }} inactive)</p>
+        <div class="row" style="gap:8px;">
+          <a class="btn {{ 'btn-primary' if filter == 'active' else 'btn-ghost' }}" href="/admin/users?filter=active" style="font-size:13px;">Active</a>
+          <a class="btn {{ 'btn-primary' if filter == 'inactive' else 'btn-ghost' }}" href="/admin/users?filter=inactive" style="font-size:13px;">Inactive</a>
+          <a class="btn {{ 'btn-primary' if filter == 'all' else 'btn-ghost' }}" href="/admin/users?filter=all" style="font-size:13px;">All</a>
+        </div>
+      </div>
       <div class="hr"></div>
 
       {% if users|length == 0 %}
@@ -84,6 +115,7 @@
                     <summary style="cursor:pointer; font-weight:700; font-size:13px; color:var(--info);">Edit</summary>
                     <div style="margin-top:12px; padding:16px; background:var(--bg); border-radius:var(--radius-sm);">
                       <form method="post" action="/admin/users/{{ u.id }}/update">
+                        {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
                         <div class="field" style="margin-bottom:12px;">
                           <label style="font-weight:700; margin-bottom:6px; display:block; font-size:13px;">Role</label>
                           <select name="role" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:var(--radius-sm);">
@@ -94,10 +126,18 @@
                         </div>
                         <div class="field" style="margin-bottom:12px;">
                           <label style="display:flex; align-items:center; gap:8px; font-size:13px;">
+                            <input type="hidden" name="is_active" value="false">
                             <input type="checkbox" name="is_active" value="true" {{ 'checked' if u.is_active else '' }}>
                             Active
                           </label>
                         </div>
+                        {% if stepup_required or stepup_error %}
+                        <div class="field" style="margin-bottom:12px; padding:8px; background:#fefce8; border-radius:var(--radius-sm);">
+                          <label style="font-weight:700; margin-bottom:6px; display:block; font-size:13px;">Your Password (for verification)</label>
+                          <input type="password" name="stepup_password" required style="width:100%; padding:8px; border:1px solid var(--border); border-radius:var(--radius-sm);">
+                          <div class="small" style="color:var(--muted); margin-top:4px;">Enter your current password to authorize this action.</div>
+                        </div>
+                        {% endif %}
                         <button type="submit" class="btn" style="font-size:13px;">Update</button>
                       </form>
                     </div>
@@ -117,6 +157,7 @@
     <strong>Role Permissions:</strong>
     <ul style="margin:8px 0 0 18px; padding:0;">
       <li><strong>Viewer:</strong> Read-only access to runs, alerts, and history</li>
+      <li><strong>Auditor:</strong> Viewer access plus export and audit log capabilities</li>
       <li><strong>Operator:</strong> Can upload CSV and update alert status/notes</li>
       <li><strong>Manager:</strong> Can view settings and configuration</li>
       <li><strong>Admin:</strong> Full access including user management and settings changes</li>

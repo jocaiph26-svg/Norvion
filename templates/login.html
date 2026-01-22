@@ -113,6 +113,8 @@
         <div class="login-error">Invalid email or password.</div>
       {% elif error == 'rate_limited' %}
         <div class="login-error">Too many login attempts. Please wait and try again.</div>
+      {% elif error == 'session_expired' %}
+        <div class="login-error">Your session has expired. Please log in again.</div>
       {% endif %}
 
       {% if request.query_params.get('reset') == '1' %}
@@ -133,6 +135,12 @@
 
       <div class="login-links">
         <a href="/forgot-password">Forgot password?</a>
+      </div>
+
+      <div style="margin-top:24px; padding-top:16px; border-top:1px solid var(--border); text-align:center;">
+        <div style="font-size:12px; color:var(--muted); line-height:1.5;">
+          Connection secured · Sessions expire after inactivity
+        </div>
       </div>
     </div>
   </div>

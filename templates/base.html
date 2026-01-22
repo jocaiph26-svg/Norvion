@@ -70,18 +70,26 @@
           Settings
         </a>
         {% endif %}
+        {% if access_role == 'admin' %}
         <a href="/integrations{{ rq }}"
            class="{{ 'active' if path.startswith('/integrations') else '' }}">
           Integrations
         </a>
+        {% endif %}
         <a href="/digest/weekly{{ rq }}"
-           class="{{ 'active' if path.startswith('/digest/weekly') else '' }}">
+           class="{{ 'active' if path in ['/digest/weekly', '/insights/weekly'] or path.startswith('/insights/weekly') else '' }}">
           Weekly Summary
         </a>
-        {% if access_role == 'admin' %}
+        {% if access_role in ['manager', 'admin'] %}
         <a href="/admin/users{{ rq }}"
            class="{{ 'active' if path.startswith('/admin/users') else '' }}">
           Users
+        </a>
+        {% endif %}
+        {% if access_role == 'admin' %}
+        <a href="/access/events{{ rq }}"
+           class="{{ 'active' if path.startswith('/access/events') else '' }}">
+          Access Log
         </a>
         {% endif %}
       </nav>
@@ -95,6 +103,9 @@
           {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
           <button type="submit" class="btn btn-ghost" style="width: 100%; font-size: 13px;">Log out</button>
         </form>
+        <div style="margin-top: 12px; font-size: 11px; color: var(--meta);">
+          v1.0 · {{ "Production" if not demo_mode else "Development" }}
+        </div>
       </div>
       {% endif %}
 
@@ -107,7 +118,9 @@
             &nbsp;
           </div>
           <div class="topbar-actions">
-            <a class="btn" href="/upload">Upload CSV</a>
+            {% if access_role in ['operator', 'manager', 'admin'] %}
+              <a class="btn" href="/upload">Upload CSV</a>
+            {% endif %}
           </div>
         </div>
       </header>
@@ -120,7 +133,7 @@
           <div>
             <strong>Disclaimer:</strong>
             Summaries computed from uploaded data using deterministic rules (stored at run time).
-            Not financial advice. Verify with a qualified professional.
+            Not financial advice. Use your organization's review process.
           </div>
           <div>
             Design goal:

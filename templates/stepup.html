@@ -124,6 +124,7 @@
       {% endif %}
 
       <form method="post" action="/stepup" class="login-form">
+        {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
         <input type="hidden" name="next" value="{{ next }}">
         <div class="field">
           <label for="password">Password</label>

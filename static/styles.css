@@ -3,13 +3,8 @@
    ========================= */
 
 :root {
-  /* ============================================================
-     BACKGROUND TEST (2026-01-18)
-     Original: --bg: #f6f7f9;
-     Test:     --bg: #eceef2; (slightly darker, neutral slate)
-     To revert: change --bg back to #f6f7f9
-     ============================================================ */
-  --bg: #eceef2;
+  /* Premium enterprise background - light, clean, professional */
+  --bg: #f8fafc;
   --card: #ffffff;
   --border: #dfe2e7;
   --text: #1c1e21;
@@ -18,9 +13,10 @@
   --brand: #1f2328;
   --brand2: #2563eb;
 
-  --info: #3b5b8f;
-  --warn: #8a6a1d;
-  --crit: #8b3a3a;
+  /* E3: Enterprise severity colors */
+  --info: #64748b;  /* Neutral gray */
+  --warn: #d97706;  /* Amber */
+  --crit: #dc2626;  /* Red */
 
   --radius: 12px;
   --radius-sm: 10px;
@@ -539,9 +535,13 @@ small { color: var(--meta); }
 /* Status badge variants (restrained neutral palette) */
 .badge.review { background: #fef8ed; color: #8a6a1d; }
 .badge.noted { background: #e9eef8; color: #3b5b8f; }
+.badge.acknowledged { background: #e0f2fe; color: #075985; }
+.badge.ignore { background: #fef2f2; color: #991b1b; }
+.badge.snoozed { background: #faf5ff; color: #7e22ce; }
 .badge.suppressed { background: #f2f4f7; color: #8a9099; }
 .badge.quieted { background: #f2f4f7; color: #8a9099; }
 .badge.resolved { background: #eef6f0; color: #4a7c59; }
+.badge.closed { background: #f0f9ff; color: #0369a1; }
 
 .badge.muted {
   background: #f2f4f7;
@@ -739,6 +739,15 @@ small { color: var(--meta); }
   line-height: 1.4;
 }
 
+/* Disclaimer callout - prominent but non-alarming */
+.callout.disclaimer {
+  background: #fefce8;
+  border: 1px solid #fef08a;
+  border-left: 4px solid #eab308;
+  color: #854d0e;
+  border-radius: 8px;
+}
+
 /* =========================
    INSIGHTS
    ========================= */
@@ -818,6 +827,11 @@ summary:hover { color: var(--brand2); }
   font-size: 13px;
   color: var(--muted);
   line-height: 1.45;
+}
+
+.footer a:hover,
+.footer a:focus-visible {
+  text-decoration: underline;
 }
 
 /* =========================

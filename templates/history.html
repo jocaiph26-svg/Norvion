@@ -21,7 +21,7 @@
               <th>File</th>
               <th>Period end</th>
               <th>Cash</th>
-              <th>Runway</th>
+              <th>Coverage</th>
               <th>Completeness</th>
               <th></th>
             </tr>
@@ -56,7 +56,7 @@
           </tbody>
         </table>
         <div class="small" style="padding:12px 20px; color:var(--muted); border-top:1px solid var(--border);">
-          Completeness is a system-derived indicator stored at run time. It does not certify accuracy or completeness of uploaded data.
+          Coverage: historical cash balance ÷ daily expense at analysis time (stored). Completeness: system-derived indicator (does not certify accuracy).
         </div>
       </div>
     </div>
@@ -64,10 +64,14 @@
     <div class="card">
       <div class="card-b">
         <div class="empty">
-          <div class="empty-title">No runs yet</div>
+          <div class="empty-title">No snapshots yet</div>
           <div class="empty-sub">
-            Upload a CSV file to create your first run snapshot.
+            Upload transaction data to generate your first deterministic snapshot.
+            Each run is stored as an immutable audit record.
           </div>
+          {% if access_role in ['operator', 'manager', 'admin'] %}
+          <a class="btn" href="/upload" style="margin-top:16px;">Upload CSV</a>
+          {% endif %}
         </div>
       </div>
     </div>

@@ -16,6 +16,18 @@
     </div>
   {% endif %}
 
+  <div class="callout disclaimer" style="margin-bottom:14px;">
+    <strong>Disclaimer:</strong> This alert is derived from stored data using deterministic rules. It is not financial advice. Use your organization's review process to evaluate this alert.
+  </div>
+
+  {# P0-G1: Alert lifecycle clarification #}
+  <div class="callout" style="margin-bottom:14px; border-left:3px solid var(--border); background:var(--bg-dim);">
+    <div style="font-weight:700; margin-bottom:6px;">Alert lifecycle</div>
+    <div class="small" style="line-height:1.6; color:var(--text);">
+      Alerts are evaluated once at run time using stored data and fixed thresholds. Each alert is an immutable snapshot from that analysis. Alerts are not tasks, tickets, or workflow states. Status updates do not affect alert evaluation or trigger re-analysis. New runs evaluate alerts independently using their own data snapshots.
+    </div>
+  </div>
+
   <div class="grid cols-2">
     <div class="card">
       <div class="card-b">
@@ -52,6 +64,10 @@
           <div class="badge {{ 'crit' if alert_details.severity=='critical' else ('warn' if alert_details.severity=='warning' else 'info') }}">
             {{ alert_details.severity|upper }}
           </div>
+          {# P1-U4: Alert severity semantics #}
+          <div class="small" style="margin-top:6px; color:var(--muted); line-height:1.5;">
+            Severity is a descriptive threshold classification derived from stored rule definitions. It does not indicate business priority or urgency.
+          </div>
           <h2 style="margin-top:10px;">{{ alert_details.title }}</h2>
           <div class="small" style="margin-top:6px; color:var(--muted);">Recorded summary (stored)</div>
           {% if alert_details.why %}
@@ -68,6 +84,126 @@
               {% endif %}
             </div>
           {% endif %}
+
+          {# P0-U1: Rule Documentation - Display stored rule definition #}
+          {% if alert_details.rule_id or alert_details.rule_name %}
+          <div class="hr"></div>
+          <div style="font-weight:900; margin-bottom:8px;">Rule definition (stored)</div>
+          <div class="kv">
+            {% if alert_details.rule_name %}
+            <div class="kv-row">
+              <div class="kv-label">Rule</div>
+              <div class="kv-value">{{ alert_details.rule_name }}</div>
+            </div>
+            {% endif %}
+            {% if alert_details.rule_threshold %}
+            <div class="kv-row">
+              <div class="kv-label">Condition</div>
+              <div class="kv-value" style="font-family:var(--font-mono); font-size:13px;">{{ alert_details.rule_threshold }}</div>
+            </div>
+            {% endif %}
+            {% if alert_details.data_requirements and alert_details.data_requirements|length > 0 %}
+            <div class="kv-row">
+              <div class="kv-label">Required data</div>
+              <div class="kv-value">{{ alert_details.data_requirements|join(", ") }}</div>
+            </div>
+            {% endif %}
+            {% if alert_details.suppression_reasons and alert_details.suppression_reasons|length > 0 %}
+            <div class="kv-row">
+              <div class="kv-label">Suppression conditions</div>
+              <div class="kv-value">{{ alert_details.suppression_reasons|join(", ") }}</div>
+            </div>
+            {% endif %}
+            {% if alert_details.rule_version %}
+            <div class="kv-row">
+              <div class="kv-label">Version</div>
+              <div class="kv-value" style="font-family:var(--font-mono); font-size:13px;">{{ alert_details.rule_version }}</div>
+            </div>
+            {% endif %}
+          </div>
+          <div class="small" style="margin-top:6px; color:var(--muted);">
+            Rule definition shown as stored at run time.
+          </div>
+          {% endif %}
+
+          {# P0-B1: Alert Component Breakdown - Show observed vs threshold comparison #}
+          {% set has_breakdown = (
+            (runway_val is not none and threshold_days_val is not none) or
+            (expense_change_val is not none and ev.threshold is not none) or
+            (income_change_val is not none and ev.threshold is not none) or
+            (share_val is not none and ev.threshold is not none) or
+            (ev.mean is not none and ev.std is not none and ev.sigma is not none)
+          ) %}
+          {% if has_breakdown %}
+          <div class="hr"></div>
+          <div style="font-weight:900; margin-bottom:8px;">Trigger breakdown (stored)</div>
+          <table style="width:100%; border-collapse:collapse; font-size:14px;">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border);">
+                <th style="text-align:left; padding:8px 0; font-weight:700;">Component</th>
+                <th style="text-align:right; padding:8px 0; font-weight:700;">Observed</th>
+                <th style="text-align:center; padding:8px 0; font-weight:700;"></th>
+                <th style="text-align:right; padding:8px 0; font-weight:700;">Threshold</th>
+              </tr>
+            </thead>
+            <tbody>
+              {# Runway alert breakdown #}
+              {% if runway_val is not none and threshold_days_val is not none %}
+              <tr>
+                <td style="padding:6px 0;">Cash runway</td>
+                <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ runway_val|num(0) }} days</td>
+                <td style="padding:6px 0; text-align:center; color:var(--muted);">&lt;</td>
+                <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ threshold_days_val|num(0) }} days</td>
+              </tr>
+              {% endif %}
+              {# Expense spike breakdown #}
+              {% if expense_change_val is not none and ev.threshold is not none %}
+              <tr>
+                <td style="padding:6px 0;">Expense change</td>
+                <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ expense_change_val|pct }}</td>
+                <td style="padding:6px 0; text-align:center; color:var(--muted);">&gt;</td>
+                <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ ev.threshold|pct }}</td>
+              </tr>
+              {% endif %}
+              {# Revenue drop breakdown #}
+              {% if income_change_val is not none and ev.threshold is not none %}
+              <tr>
+                <td style="padding:6px 0;">Income change</td>
+                <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ income_change_val|pct }}</td>
+                <td style="padding:6px 0; text-align:center; color:var(--muted);">&lt;</td>
+                <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">-{{ ev.threshold|pct }}</td>
+              </tr>
+              {% endif %}
+              {# Concentration breakdown #}
+              {% if share_val is not none and ev.threshold is not none and expense_change_val is none and income_change_val is none %}
+              <tr>
+                <td style="padding:6px 0;">Concentration share</td>
+                <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ share_val|pct }}</td>
+                <td style="padding:6px 0; text-align:center; color:var(--muted);">&gt;</td>
+                <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ ev.threshold|pct }}</td>
+              </tr>
+              {% endif %}
+              {# Large expense breakdown #}
+              {% if ev.mean is not none and ev.std is not none and ev.sigma is not none %}
+              <tr>
+                <td style="padding:6px 0;">Expense amount</td>
+                <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ ev.threshold|num(2) if ev.threshold else "—" }}</td>
+                <td style="padding:6px 0; text-align:center; color:var(--muted);">&gt;</td>
+                <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ ev.mean|num(2) }} + {{ ev.sigma }}σ</td>
+              </tr>
+              {% endif %}
+            </tbody>
+          </table>
+          {% if gap_val is not none %}
+          <div class="small" style="margin-top:8px; color:var(--muted);">
+            Deviation beyond threshold: {{ (gap_val * 100)|num(0) }}%
+          </div>
+          {% endif %}
+          <div class="small" style="margin-top:6px; color:var(--muted);">
+            Values are shown exactly as stored at run time.
+          </div>
+          {% endif %}
+
           {% if has_key_evidence %}
             <div class="hr"></div>
             <div style="font-weight:900; margin-bottom:8px;">Key evidence (stored)</div>
@@ -240,12 +376,15 @@
                         <tr>
                           <td style="padding:6px 0;">{{ k|replace('_', ' ')|title }}</td>
                           <td style="padding:6px 0;">
+                            {#- P1-05: Apply redaction to vendor/counterparty evidence fields -#}
+                            {%- set is_vendor_field = k in ['top_vendor', 'counterparty', 'vendor', 'vendor_name', 'largest_vendor'] -%}
                             {#- Format complex types (lists/dicts) as readable text -#}
                             {%- if v is mapping -%}
                               {#- Dict: format as key-value pairs -#}
                               <div class="small" style="line-height:1.6;">
                                 {% for dk, dv in v.items() %}
-                                  <div><span style="font-weight:600;">{{ dk|replace('_', ' ')|title }}:</span> {{ dv }}</div>
+                                  {%- set is_sub_vendor = dk in ['counterparty', 'vendor', 'vendor_name'] -%}
+                                  <div><span style="font-weight:600;">{{ dk|replace('_', ' ')|title }}:</span> {{ dv|redact_vendor(access_role) if is_sub_vendor else dv }}</div>
                                 {% endfor %}
                               </div>
                             {%- elif v is iterable and v is not string -%}
@@ -256,7 +395,8 @@
                                   {% for item in v[:5] %}
                                     <div style="margin-bottom:4px; padding-left:8px; border-left:2px solid var(--border);">
                                       {% for ik, iv in item.items() %}
-                                        <span style="font-weight:600;">{{ ik|replace('_', ' ')|title }}:</span> {{ iv }}{% if not loop.last %}, {% endif %}
+                                        {%- set is_sub_vendor = ik in ['counterparty', 'vendor', 'vendor_name'] -%}
+                                        <span style="font-weight:600;">{{ ik|replace('_', ' ')|title }}:</span> {{ iv|redact_vendor(access_role) if is_sub_vendor else iv }}{% if not loop.last %}, {% endif %}
                                       {% endfor %}
                                     </div>
                                   {% endfor %}
@@ -269,7 +409,7 @@
                                 {{ v|join(', ') }}
                               {% endif %}
                             {%- else -%}
-                              {{ v }}
+                              {{ v|redact_vendor(access_role) if is_vendor_field else v }}
                             {%- endif -%}
                           </td>
                         </tr>
@@ -314,15 +454,12 @@
     <details class="card emphasis">
       <summary style="cursor:pointer; font-weight:900; padding:16px 20px;">Status record (stored)</summary>
       <div class="card-b" style="padding-top:6px;">
-        {% if not can_update %}
-          <div class="callout">
-            Status updates are disabled because this is a historical run (read-only).
-          </div>
-        {% endif %}
+        {% if can_update and access_role in ['operator', 'manager', 'admin'] %}
         <form action="/alerts/{{ alert_id }}/update" method="post">
+          {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
           <div class="field">
             <label>Status</label>
-            <select name="status" {% if not can_update %}disabled{% endif %}>
+            <select name="status">
               {% set cur = state.status if state else 'review' %}
               {% for opt in ['review','noted','acknowledged','ignore','snoozed'] %}
                 <option value="{{ opt }}" {{ 'selected' if cur==opt else '' }}>{{ opt|capitalize }}</option>
@@ -344,21 +481,19 @@
 
           <div class="field" style="margin-top:12px;">
             <label>Note (optional)</label>
-            <textarea name="note" class="note-textarea js-autosize" placeholder="Optional note (stored)" {% if not can_update %}disabled{% endif %} style="min-height:2.5em; resize:none;">{{ state.note if state and state.note is not none else '' }}</textarea>
+            <textarea name="note" class="note-textarea js-autosize" placeholder="Optional note (stored)" style="min-height:2.5em; resize:none;">{{ state.note if state and state.note is not none else '' }}</textarea>
           </div>
 
           <div class="row" style="margin-top:14px;">
-            <button class="btn btn-primary" type="submit" {% if not can_update %}disabled{% else %}disabled{% endif %}>Record status</button>
+            <button class="btn btn-primary" type="submit" disabled>Record status</button>
             {% if state %}
               <div class="pill dim">Last updated: {{ state.updated_at|humandt }}</div>
               <div class="pill dim">Score at last update: {{ '%.2f'|format(state.last_score or 0) }}</div>
             {% endif %}
           </div>
-          {% if can_update %}
-            <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
-              Button enables when status or note changes.
-            </div>
-          {% endif %}
+          <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
+            Button enables when status or note changes.
+          </div>
         </form>
         <script>
           (function() {
@@ -368,14 +503,9 @@
             var note = form.querySelector('textarea[name="note"]');
             var btn = form.querySelector('button[type="submit"]');
             if (!select || !note || !btn) return;
-            var canUpdate = {{ 'true' if can_update else 'false' }};
             var initialStatus = select.value;
             var initialNote = note.value;
             function toggle() {
-              if (!canUpdate) {
-                btn.disabled = true;
-                return;
-              }
               var changed = (select.value !== initialStatus) || (note.value !== initialNote);
               btn.disabled = !changed;
             }
@@ -384,19 +514,107 @@
             toggle();
           })();
         </script>
+        {% else %}
+        <div style="padding:12px; background:var(--bg-dim); border-radius:var(--radius-sm); color:var(--muted);">
+          <div style="font-weight:700; margin-bottom:6px;">Status (stored): {{ state.status|capitalize if state else 'Review' }}</div>
+          {% if state %}
+          <div style="font-size:13px; margin-bottom:8px;">Last updated: {{ state.updated_at|humandt }}</div>
+          {% endif %}
+          {% if state and state.note and state.note.strip() %}
+          <div style="font-weight:700; margin-top:12px; margin-bottom:4px;">Note (stored):</div>
+          <div style="font-size:13px; margin-bottom:8px; white-space:pre-wrap;">{{ state.note }}</div>
+          {% endif %}
+          <div style="font-size:13px;">This status is read-only for your role or because this is a stored snapshot.</div>
+        </div>
+        {% endif %}
       </div>
     </details>
   </div>
 
   <div style="height:14px;"></div>
 
+  {# P1-B4: Historical Alert Comparison - Show prior occurrences of this alert type #}
+  {% if appearances and appearances|length > 0 %}
+  <div class="card">
+    <div class="card-b">
+      <h2>Historical occurrences (stored)</h2>
+      <p class="sub" style="margin-top:6px;">This alert type has occurred in {{ appearances|length }} stored run{{ 's' if appearances|length > 1 else '' }}.</p>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        Each entry shows the stored triggering values from that run. Values are not recalculated.
+      </div>
+      <div style="margin-top:12px;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border);">
+              <th style="text-align:left; padding:8px 4px; font-weight:700;">Run</th>
+              <th style="text-align:left; padding:8px 4px; font-weight:700;">Recorded</th>
+              <th style="text-align:left; padding:8px 4px; font-weight:700;">Severity</th>
+              <th style="text-align:left; padding:8px 4px; font-weight:700;">Stored values</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for app in appearances %}
+              <tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:8px 4px;">
+                  <a href="/run/{{ app.run_id }}" class="link" style="font-family:var(--font-mono); font-size:12px;">
+                    #{{ app.run_id }}
+                  </a>
+                </td>
+                <td style="padding:8px 4px; font-size:12px;">
+                  {{ app.created_at|humandt if app.created_at else '—' }}
+                </td>
+                <td style="padding:8px 4px;">
+                  <span class="badge {{ 'crit' if app.severity=='critical' else ('warn' if app.severity=='warning' else 'info') }}" style="font-size:10px;">
+                    {{ app.severity|upper if app.severity else 'INFO' }}
+                  </span>
+                </td>
+                <td style="padding:8px 4px; font-size:12px; font-family:var(--font-mono);">
+                  {% if app.evidence %}
+                    {# Display key evidence fields based on alert type #}
+                    {% if app.evidence.runway_days is not none %}
+                      Runway: {{ app.evidence.runway_days|num(0) }}d
+                      {% if app.evidence.threshold_days %} (threshold: {{ app.evidence.threshold_days|num(0) }}d){% endif %}
+                    {% elif app.evidence.expense_change is not none %}
+                      Expense change: {{ (app.evidence.expense_change * 100)|num(1) }}%
+                      {% if app.evidence.threshold %} (threshold: {{ (app.evidence.threshold * 100)|num(1) }}%){% endif %}
+                    {% elif app.evidence.income_change is not none %}
+                      Income change: {{ (app.evidence.income_change * 100)|num(1) }}%
+                      {% if app.evidence.threshold %} (threshold: -{{ (app.evidence.threshold * 100)|num(1) }}%){% endif %}
+                    {% elif app.evidence.share is not none %}
+                      Concentration: {{ (app.evidence.share * 100)|num(1) }}%
+                      {% if app.evidence.threshold %} (threshold: {{ (app.evidence.threshold * 100)|num(1) }}%){% endif %}
+                    {% elif app.evidence.gap is not none %}
+                      Gap: {{ (app.evidence.gap * 100)|num(0) }}%
+                    {% else %}
+                      —
+                    {% endif %}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        This is a factual record of prior occurrences. It does not indicate trends or predict future alerts.
+      </div>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+  {% endif %}
+
+  {# MEDIUM(11): Hide audit trail card entirely for non-auditors #}
+  {% if audit_allowed %}
   <div class="grid cols-2">
     <div class="card">
       <div class="card-b">
         <h2>Audit trail</h2>
         <p class="sub" style="margin-top:6px;">Events are stored append-only for this alert.</p>
         <p class="sub" style="margin-top:4px;">Events are shown in recorded order with stored status and note.</p>
-        {% if audit_allowed and total_events is defined and total_events > 0 %}
+        {% if total_events is defined and total_events > 0 %}
           <div class="small" style="margin-top:8px; color:var(--muted);">
             Showing {{ ((events_page - 1) * events_per_page) + 1 }} - {{ ((events_page - 1) * events_per_page) + (events|length) }} of {{ total_events }} events
           </div>
@@ -405,9 +623,7 @@
           <summary style="cursor:pointer; font-weight:900;">Technical / audit details (stored)</summary>
           <div style="height:10px;"></div>
           <div class="hr"></div>
-          {% if not audit_allowed %}
-            <div class="callout">Audit trail is available to admin or auditor access only.</div>
-          {% elif events|length == 0 %}
+          {% if events|length == 0 %}
             <div class="callout">No events recorded yet.</div>
           {% else %}
             <table class="table">
@@ -460,4 +676,5 @@
       </div>
     </details>
   </div>
+  {% endif %}
 {% endblock %}

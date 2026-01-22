@@ -39,7 +39,7 @@
 
     <div class="grid cols-4">
     <div class="card kpi">
-      <div class="label">Calculated cash position</div>
+      <div class="label">Cash position snapshot (stored)</div>
       <div class="value">
         {% if s.current_cash is not none %}
           {{ s.current_cash|money(s.currency) }}
@@ -47,7 +47,7 @@
       </div>
       <div class="hint">
         {% if s.current_cash is not none %}
-          Computed from starting cash + cumulative net change.
+          Stored snapshot: starting cash + cumulative net change at analysis time. Not a current balance.
         {% else %}
           Not available for this run.
         {% endif %}
@@ -55,7 +55,7 @@
     </div>
 
       <div class="card kpi">
-        <div class="label">Calculated runway (static burn)</div>
+        <div class="label">Cash coverage snapshot (stored)</div>
         <div class="value">
           {% if s.runway_days is not none and s.runway_days <= 0 %}
             ≤0 days
@@ -65,7 +65,7 @@
         </div>
         <div class="hint">
           {% if s.runway_days is not none %}
-            Computed from current cash ÷ burn rate (static). Does not account for future changes.
+            Stored snapshot: cash balance ÷ daily expense at analysis time. Not a forecast.
           {% else %}
             Not available for this run.
           {% endif %}
@@ -189,7 +189,7 @@
                     {%- if vendor_name == '' or vendor_name|lower == 'nan' or vendor_name|lower == 'none' or vendor_name|lower == 'null' -%}
                       <span style="color:var(--muted); font-style:italic;">(No vendor recorded)</span>
                     {%- else -%}
-                      {{ vendor_name }}
+                      {{ vendor_name|redact_vendor(access_role) }}
                     {%- endif -%}
                   </td>
                   <td style="padding:6px 0;">{{ v.amount|money(s.currency) }}</td>

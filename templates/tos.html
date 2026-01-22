@@ -7,6 +7,14 @@
     </div>
   </div>
 
+  {% if request.query_params.get('error') == 'csrf' %}
+    <div class="card" style="background:#fef2f2; border-left:4px solid #ef4444; margin-bottom:16px;">
+      <div class="card-b" style="padding:12px 16px;">
+        <strong>Session verification failed.</strong> Please try accepting again.
+      </div>
+    </div>
+  {% endif %}
+
   {% if already_accepted %}
     <div class="card" style="background:var(--bg-success, #d4edda); border-left:4px solid var(--success, #28a745); margin-bottom:16px;">
       <div class="card-b" style="padding:12px 16px;">
@@ -49,7 +57,7 @@
 
         <h3>4. Limitation of Liability</h3>
         <p>The information provided by this tool is for general informational purposes only. <strong>You are solely responsible for any decisions made based on this information.</strong></p>
-        <p>We recommend consulting qualified professionals (accountants, financial advisors, lawyers) for any significant business decisions. This tool is designed to surface patterns in your data, not to advise on actions.</p>
+        <p>Use your organization's review process for any decisions based on this information. This tool is designed to surface patterns in your data, not to advise on actions.</p>
 
         <h3>5. Accuracy</h3>
         <p>While we strive for accurate calculations, results depend on the quality and completeness of the data you upload. Data quality issues (missing fields, incorrect formats, incomplete records) may affect analysis accuracy.</p>
@@ -63,8 +71,8 @@
         {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
         {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
         <div style="display:flex; align-items:center; gap:16px;">
-          <button type="submit" class="btn">I Accept These Terms</button>
-          <a href="/logout" style="color:var(--muted); text-decoration:none;">Decline &amp; Logout</a>
+          <button type="submit" class="btn" {% if already_accepted %}disabled style="opacity:0.5; cursor:not-allowed;"{% endif %}>{% if already_accepted %}Already Accepted{% else %}I Accept These Terms{% endif %}</button>
+          <button type="button" onclick="this.form.action='/logout'; this.form.submit();" style="background:none; border:none; color:var(--muted); text-decoration:none; cursor:pointer; padding:0; font:inherit;">Decline &amp; Logout</button>
         </div>
       </form>
     </div>

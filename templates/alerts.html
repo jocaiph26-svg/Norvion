@@ -4,11 +4,21 @@
     <div>
       <h1 class="h1">Alerts</h1>
       <p class="sub">Read-only alerts view with stored status and evidence.</p>
+      {# P1-U4: Alert severity semantics - Enhanced severity legend with semantic clarification #}
+      <div style="margin-top:12px; display:flex; gap:12px; align-items:center; font-size:13px; flex-wrap:wrap;">
+        <span style="color:var(--muted);">Severity:</span>
+        <span class="badge crit">CRITICAL</span>
+        <span class="badge warn">WARNING</span>
+        <span class="badge info">INFORMATIONAL</span>
+      </div>
+      <div class="small" style="margin-top:6px; color:var(--muted); line-height:1.5;">
+        Severity indicates the threshold classification assigned at analysis time. It is a descriptive label derived from stored rule definitions. Severity does not indicate business priority, urgency, or required action. All alerts require independent professional review.
+      </div>
       {% if latest_run %}
-        <div class="row" style="align-items:center; gap:8px; margin-top:8px;">
+        <div class="row" style="align-items:center; gap:8px; margin-top:12px;">
           <span class="badge">Run {{ latest_run.id }}</span>
           {% if active_run_id is defined and latest_run_id is defined and active_run_id and latest_run_id and (active_run_id != latest_run_id) %}
-            <span class="badge">Stored run (read-only)</span>
+            <span class="badge">Stored snapshot (read-only)</span>
           {% else %}
             <span class="badge">Latest run</span>
           {% endif %}
@@ -18,15 +28,31 @@
     </div>
   </div>
 
+  <div class="callout disclaimer" style="margin-bottom:14px;">
+    <strong>Disclaimer:</strong> Alerts are derived from stored data using deterministic rules. They are not financial advice. Use your organization's review process to evaluate all alerts.
+  </div>
+
+  {# P0-G1: Alert lifecycle clarification #}
+  <div class="callout" style="margin-bottom:14px; border-left:3px solid var(--border); background:var(--bg-dim);">
+    <div style="font-weight:700; margin-bottom:6px;">Alert lifecycle</div>
+    <div class="small" style="line-height:1.6; color:var(--text);">
+      Alerts are evaluated once at run time using stored data and fixed thresholds. Each alert is an immutable snapshot from that analysis. Alerts are not tasks, tickets, or workflow states. Status updates do not affect alert evaluation or trigger re-analysis.
+    </div>
+  </div>
+
   {# GLOBAL EMPTY STATE: no run or nothing to show at all #}
   {% if (not latest_run) and ((all_active|length == 0)) %}
     <div class="card">
       <div class="card-b">
         <div class="empty">
-          <div class="empty-title">No alerts yet</div>
+          <div class="empty-title">No alerts recorded</div>
           <div class="empty-sub">
-            Upload a CSV file to create your first run snapshot.
+            Upload transaction data to generate a deterministic snapshot.
+            Alerts are derived from stored data using fixed, auditable rules.
           </div>
+          {% if access_role in ['operator', 'manager', 'admin'] %}
+          <a class="btn" href="/upload" style="margin-top:16px;">Upload CSV</a>
+          {% endif %}
         </div>
       </div>
     </div>
@@ -127,7 +153,8 @@
                                   {%- if v is mapping -%}
                                     <div class="small" style="line-height:1.6;">
                                       {% for dk, dv in v.items() %}
-                                        <div><span style="font-weight:600;">{{ dk|replace('_', ' ')|title }}:</span> {{ dv }}</div>
+                                        {%- set is_sub_vendor = dk in ['counterparty', 'vendor', 'vendor_name'] -%}
+                                        <div><span style="font-weight:600;">{{ dk|replace('_', ' ')|title }}:</span> {{ dv|redact_vendor(access_role) if is_sub_vendor else dv }}</div>
                                       {% endfor %}
                                     </div>
                                   {%- elif v is iterable and v is not string -%}
@@ -136,7 +163,8 @@
                                         {% for item in v[:3] %}
                                           <div style="margin-bottom:4px; padding-left:8px; border-left:2px solid var(--border);">
                                             {% for ik, iv in item.items() %}
-                                              <span style="font-weight:600;">{{ ik|replace('_', ' ')|title }}:</span> {{ iv }}{% if not loop.last %}, {% endif %}
+                                              {%- set is_sub_vendor = ik in ['counterparty', 'vendor', 'vendor_name'] -%}
+                                              <span style="font-weight:600;">{{ ik|replace('_', ' ')|title }}:</span> {{ iv|redact_vendor(access_role) if is_sub_vendor else iv }}{% if not loop.last %}, {% endif %}
                                             {% endfor %}
                                           </div>
                                         {% endfor %}
@@ -148,7 +176,8 @@
                                       {{ v|join(', ') }}
                                     {% endif %}
                                   {%- else -%}
-                                    {{ v }}
+                                    {%- set is_vendor_field = k in ['top_vendor', 'counterparty', 'vendor', 'vendor_name', 'largest_vendor'] -%}
+                                    {{ v|redact_vendor(access_role) if is_vendor_field else v }}
                                   {%- endif -%}
                                 </td>
                               </tr>

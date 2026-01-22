@@ -2,14 +2,14 @@
 {% block content %}
   <div class="header">
     <div>
-      <h1 class="h1">Run {{ run_id }}</h1>
+      <h1 class="h1">Snapshot {{ run_id }}</h1>
       <p class="sub">Recorded at: {{ created_at|humandt }}</p>
       {% if run_scope %}
         <div class="row" style="margin-top:8px; gap:8px;">
           {% if run_scope.is_latest %}
             <span class="badge">Latest</span>
           {% else %}
-            <span class="badge">Stored run (read-only)</span>
+            <span class="badge">Stored snapshot (read-only)</span>
           {% endif %}
         </div>
       {% endif %}
@@ -23,32 +23,40 @@
 
   <div class="grid cols-4">
     <div class="card kpi">
-      <div class="label">Calculated cash position</div>
+      <div class="label">Cash position snapshot</div>
       <div class="value">
         {% if summary.current_cash is not none %}
           {{ summary.current_cash|money(summary.currency) }}
+        {% else %}
+          —
         {% endif %}
       </div>
+      {# P1-C3: Inline metric definition for cash position #}
       <div class="hint">
         {% if summary.current_cash is not none %}
-          Computed from starting cash + cumulative net change.
+          <strong>Definition:</strong> Starting cash balance + cumulative net change from all transactions in the dataset.<br>
+          This is a snapshot as of analysis time, not a real-time balance. Does not connect to live bank accounts.
         {% else %}
           Not available for this run.
         {% endif %}
       </div>
     </div>
     <div class="card kpi">
-      <div class="label">Calculated runway (static burn)</div>
+      <div class="label">Cash coverage snapshot (historical)</div>
       <div class="value">
         {% if summary.runway_days is not none and summary.runway_days <= 0 %}
           ≤0 days
         {% elif summary.runway_days is not none %}
           {{ '%.0f'|format(summary.runway_days) }} days
+        {% else %}
+          —
         {% endif %}
       </div>
+      {# P1-C3: Inline metric definition for runway #}
       <div class="hint">
         {% if summary.runway_days is not none %}
-          Computed from current cash ÷ burn rate (static). Does not account for future changes.
+          <strong>Definition:</strong> Current cash balance ÷ average daily expense from recent comparison window.<br>
+          This is a backward-looking calculation based on historical spending patterns. It is not a forecast and does not predict future income, expense changes, or cash requirements.
         {% else %}
           Not available for this run.
         {% endif %}
@@ -60,11 +68,15 @@
       <div class="value">
         {% if summary.recent_income is defined and summary.recent_income is not none %}
           {{ summary.recent_income|money(summary.currency) }}
+        {% else %}
+          —
         {% endif %}
       </div>
+      {# P1-C3: Inline metric definition for recent income #}
       <div class="hint">
         {% if summary.recent_income is defined and summary.recent_income is not none %}
-          Stored in the most recent compare window.
+          <strong>Definition:</strong> Total income (inflow transactions) recorded during the recent comparison window.<br>
+          Used as a baseline for detecting income changes in the current period.
         {% else %}
           Not available for this run.
         {% endif %}
@@ -75,11 +87,15 @@
       <div class="value">
         {% if summary.recent_expense is defined and summary.recent_expense is not none %}
           {{ summary.recent_expense|money(summary.currency) }}
+        {% else %}
+          —
         {% endif %}
       </div>
+      {# P1-C3: Inline metric definition for recent expenses #}
       <div class="hint">
         {% if summary.recent_expense is defined and summary.recent_expense is not none %}
-          Stored in the most recent compare window.
+          <strong>Definition:</strong> Total expenses (outflow transactions) recorded during the recent comparison window.<br>
+          Used as a baseline for detecting expense changes in the current period.
         {% else %}
           Not available for this run.
         {% endif %}
@@ -92,14 +108,18 @@
           {{ '%.0f'|format(quality.score) }}/100{% if quality.band %} ({{ quality.band }}){% endif %}
         {% elif quality.band %}
           {{ quality.band }}
+        {% else %}
+          —
         {% endif %}
       </div>
+      {# P1-C3: Inline metric definition for data completeness #}
       <div class="hint">
         {% if quality.score is not none or quality.band %}
-          <details style="font-size:inherit;">
-            <summary style="cursor:pointer;">Band: A≥85, B≥70, C≥50, D&lt;50</summary>
-            <div style="margin-top:4px; font-size:11px; color:var(--muted);">
-              Score factors: uncategorised share (-25%), unknown vendors (-20%), duplicate rate (-15%), date coverage, invoice/direction fields. Does not certify accuracy.
+          <strong>Definition:</strong> A numeric score (0-100) measuring the presence and coverage of expected data fields in the uploaded CSV.<br>
+          <details style="font-size:inherit; margin-top:4px;">
+            <summary style="cursor:pointer;">Band thresholds: A≥85, B≥70, C≥50, D&lt;50</summary>
+            <div style="margin-top:4px; font-size:11px; color:var(--muted); line-height:1.5;">
+              Score penalties: uncategorised transactions (-25%), unknown counterparties (-20%), duplicate rate (-15%), plus factors for date coverage and required field detection (invoice number, direction). This score measures data structure only and does not certify accuracy or business validity.
             </div>
           </details>
         {% else %}
@@ -110,6 +130,14 @@
   </div>
 
   <div style="height:14px;"></div>
+
+  {# P0-G2: Run immutability affordances #}
+  <div class="callout" style="margin-bottom:14px; border-left:3px solid var(--border); background:var(--bg-dim);">
+    <div style="font-weight:700; margin-bottom:6px;">Run immutability</div>
+    <div class="small" style="line-height:1.6; color:var(--text);">
+      This run is a stored snapshot created at {{ created_at|humandt }}. All values shown are exactly as recorded at run time. Runs are never modified or recomputed after creation. Each run preserves its own data snapshot, calculation results, and alert evaluations independently.
+    </div>
+  </div>
 
   <div class="card">
     <div class="card-b">
@@ -234,6 +262,264 @@
 
   <div style="height:14px;"></div>
 
+  {# P0-C1: Period-over-Period Summary Table #}
+  {% if recent_runs and recent_runs|length > 1 %}
+  <div class="card">
+    <div class="card-b">
+      <h2>Period-over-period summary (stored)</h2>
+      <p class="sub" style="margin-top:6px;">Key metrics from recent runs, shown exactly as stored.</p>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        Each row represents one stored run snapshot. Values are not recalculated.
+      </div>
+      <div style="overflow-x:auto; margin-top:12px;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border);">
+              <th style="text-align:left; padding:8px 4px; font-weight:700; white-space:nowrap;">Run</th>
+              <th style="text-align:left; padding:8px 4px; font-weight:700; white-space:nowrap;">Period</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700; white-space:nowrap;">Income</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700; white-space:nowrap;">Expenses</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700; white-space:nowrap;">Net</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700; white-space:nowrap;">Cash</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700; white-space:nowrap;">Runway</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700; white-space:nowrap;">Alerts</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for run in recent_runs %}
+              <tr style="border-bottom:1px solid var(--border); {% if run.id == run_id %}background:var(--bg-highlight);{% endif %}">
+                <td style="padding:8px 4px;">
+                  <a href="/run/{{ run.id }}" class="link" style="font-family:var(--font-mono); font-size:12px;">
+                    #{{ run.id }}
+                  </a>
+                </td>
+                <td style="padding:8px 4px; font-size:12px; white-space:nowrap;">
+                  {% if run.window_start and run.window_end %}
+                    {{ run.window_start }} to {{ run.window_end }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+                <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                  {% if run.window_income is not none %}
+                    {{ run.window_income|money(run.currency) }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+                <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                  {% if run.window_expense is not none %}
+                    {{ run.window_expense|money(run.currency) }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+                <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                  {% if run.window_net is not none %}
+                    {{ run.window_net|money(run.currency) }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+                <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                  {% if run.current_cash is not none %}
+                    {{ run.current_cash|money(run.currency) }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+                <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                  {% if run.runway_days is not none %}
+                    {{ run.runway_days|num(0) }}d
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+                <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                  {{ run.alert_count }}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        Current run is highlighted. All values are from stored run snapshots.
+      </div>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+  {% endif %}
+
+  {# P0-C2: Same-Period-Prior-Year Comparison #}
+  {% if prior_year_run %}
+  <div class="card">
+    <div class="card-b">
+      <h2>Same-period prior-year comparison (stored)</h2>
+      <p class="sub" style="margin-top:6px;">
+        Comparison to stored run from approximately one year ago covering a similar period.
+      </p>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        Current period: {{ summary.window_start_date or '—' }} to {{ summary.end_date or '—' }}<br>
+        Prior-year period: {{ prior_year_run.window_start or '—' }} to {{ prior_year_run.window_end or '—' }}
+        (Run <a href="/run/{{ prior_year_run.run_id }}" class="link">#{{ prior_year_run.run_id }}</a>)
+      </div>
+      <div style="margin-top:12px;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border);">
+              <th style="text-align:left; padding:8px 4px; font-weight:700;">Metric</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700;">Current Period</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700;">Prior Year</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700;">Delta</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:8px 4px;">Income</td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if summary.window_income is not none %}
+                  {{ summary.window_income|money(summary.currency or 'AUD') }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if prior_year_run.window_income is not none %}
+                  {{ prior_year_run.window_income|money(prior_year_run.currency) }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if summary.window_income is not none and prior_year_run.window_income is not none %}
+                  {{ (summary.window_income - prior_year_run.window_income)|money(summary.currency or 'AUD') }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:8px 4px;">Expenses</td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if summary.window_expense is not none %}
+                  {{ summary.window_expense|money(summary.currency or 'AUD') }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if prior_year_run.window_expense is not none %}
+                  {{ prior_year_run.window_expense|money(prior_year_run.currency) }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if summary.window_expense is not none and prior_year_run.window_expense is not none %}
+                  {{ (summary.window_expense - prior_year_run.window_expense)|money(summary.currency or 'AUD') }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:8px 4px;">Net</td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if summary.window_net_change is not none %}
+                  {{ summary.window_net_change|money(summary.currency or 'AUD') }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if prior_year_run.window_net is not none %}
+                  {{ prior_year_run.window_net|money(prior_year_run.currency) }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if summary.window_net_change is not none and prior_year_run.window_net is not none %}
+                  {{ (summary.window_net_change - prior_year_run.window_net)|money(summary.currency or 'AUD') }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:8px 4px;">Cash</td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if summary.current_cash is not none %}
+                  {{ summary.current_cash|money(summary.currency or 'AUD') }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if prior_year_run.current_cash is not none %}
+                  {{ prior_year_run.current_cash|money(prior_year_run.currency) }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if summary.current_cash is not none and prior_year_run.current_cash is not none %}
+                  {{ (summary.current_cash - prior_year_run.current_cash)|money(summary.currency or 'AUD') }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:8px 4px;">Runway</td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if summary.runway_days is not none %}
+                  {{ summary.runway_days|num(0) }}d
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if prior_year_run.runway_days is not none %}
+                  {{ prior_year_run.runway_days|num(0) }}d
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {% if summary.runway_days is not none and prior_year_run.runway_days is not none %}
+                  {{ (summary.runway_days - prior_year_run.runway_days)|num(0) }}d
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:8px 4px;">Alerts</td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {{ alerts|length }}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {{ prior_year_run.alert_count }}
+              </td>
+              <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                {{ (alerts|length) - prior_year_run.alert_count }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        All values are from stored run snapshots. Deltas are arithmetic differences, not percentages or trends.
+      </div>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+  {% endif %}
+
   <div class="card">
     <div class="card-b">
       <h2>Alerts summary (stored)</h2>
@@ -277,6 +563,246 @@
   </div>
 
   <div style="height:14px;"></div>
+
+  {# P0-B3: Near-Miss Visibility - Display metrics approaching thresholds #}
+  {% set stored_settings = params.settings if params and params.settings else {} %}
+  {# Build near-miss items from stored summary values and stored thresholds #}
+  {% set near_miss_items = [] %}
+
+  {# Runway near-miss: observed runway approaching threshold (runway < threshold triggers alert) #}
+  {% if summary.runway_days is not none and stored_settings.low_cash_buffer_days is defined %}
+    {% set threshold = stored_settings.low_cash_buffer_days %}
+    {% set observed = summary.runway_days %}
+    {# For runway: alert fires when observed < threshold, so proximity = threshold / observed (inverted) #}
+    {# Near-miss when observed is close to but above threshold: observed/threshold between 1.0 and 1.25 (80-100% proximity) #}
+    {% if threshold > 0 and observed >= threshold %}
+      {% set ratio = threshold / observed %}
+      {% if ratio >= 0.80 and ratio < 1.0 %}
+        {% set _ = near_miss_items.append({
+          'metric': 'Cash runway',
+          'observed': observed|string ~ ' days',
+          'threshold': threshold|string ~ ' days',
+          'proximity': ((ratio * 100)|round(0))|int
+        }) %}
+      {% endif %}
+    {% endif %}
+  {% endif %}
+
+  {# Expense spike near-miss: observed expense_change approaching threshold #}
+  {% if summary.expense_change is not none and stored_settings.expense_spike_pct is defined %}
+    {% set threshold = stored_settings.expense_spike_pct %}
+    {% set observed = summary.expense_change %}
+    {# Alert fires when observed > threshold #}
+    {% if threshold > 0 and observed <= threshold and observed >= 0 %}
+      {% set ratio = observed / threshold %}
+      {% if ratio >= 0.80 and ratio < 1.0 %}
+        {% set _ = near_miss_items.append({
+          'metric': 'Expense change',
+          'observed': ((observed * 100)|round(1))|string ~ '%',
+          'threshold': ((threshold * 100)|round(1))|string ~ '%',
+          'proximity': ((ratio * 100)|round(0))|int
+        }) %}
+      {% endif %}
+    {% endif %}
+  {% endif %}
+
+  {# Revenue drop near-miss: observed income_change approaching negative threshold #}
+  {% if summary.income_change is not none and stored_settings.revenue_drop_pct is defined %}
+    {% set threshold = stored_settings.revenue_drop_pct %}
+    {% set observed = summary.income_change %}
+    {# Alert fires when observed < -threshold (income_change is negative for drops) #}
+    {# Near-miss when observed is negative but not quite at -threshold #}
+    {% if threshold > 0 and observed < 0 and observed >= -threshold %}
+      {% set ratio = (-observed) / threshold %}
+      {% if ratio >= 0.80 and ratio < 1.0 %}
+        {% set _ = near_miss_items.append({
+          'metric': 'Income change',
+          'observed': ((observed * 100)|round(1))|string ~ '%',
+          'threshold': '-' ~ ((threshold * 100)|round(1))|string ~ '%',
+          'proximity': ((ratio * 100)|round(0))|int
+        }) %}
+      {% endif %}
+    {% endif %}
+  {% endif %}
+
+  {# Concentration near-miss: top vendor/category share approaching threshold #}
+  {% if summary.concentration_top_vendors_expense and summary.concentration_top_vendors_expense|length > 0 and stored_settings.concentration_threshold is defined %}
+    {% set threshold = stored_settings.concentration_threshold %}
+    {% set top_vendor = summary.concentration_top_vendors_expense[0] %}
+    {% if top_vendor.share is defined and top_vendor.share is not none %}
+      {% set observed = top_vendor.share %}
+      {# Alert fires when observed > threshold #}
+      {% if threshold > 0 and observed <= threshold and observed > 0 %}
+        {% set ratio = observed / threshold %}
+        {% if ratio >= 0.80 and ratio < 1.0 %}
+          {% set _ = near_miss_items.append({
+            'metric': 'Vendor concentration',
+            'observed': ((observed * 100)|round(1))|string ~ '%',
+            'threshold': ((threshold * 100)|round(1))|string ~ '%',
+            'proximity': ((ratio * 100)|round(0))|int
+          }) %}
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  {% endif %}
+
+  {% if summary.concentration_top_categories_expense and summary.concentration_top_categories_expense|length > 0 and stored_settings.concentration_threshold is defined %}
+    {% set threshold = stored_settings.concentration_threshold %}
+    {% set top_category = summary.concentration_top_categories_expense[0] %}
+    {% if top_category.share is defined and top_category.share is not none %}
+      {% set observed = top_category.share %}
+      {# Alert fires when observed > threshold #}
+      {% if threshold > 0 and observed <= threshold and observed > 0 %}
+        {% set ratio = observed / threshold %}
+        {% if ratio >= 0.80 and ratio < 1.0 %}
+          {% set _ = near_miss_items.append({
+            'metric': 'Category concentration',
+            'observed': ((observed * 100)|round(1))|string ~ '%',
+            'threshold': ((threshold * 100)|round(1))|string ~ '%',
+            'proximity': ((ratio * 100)|round(0))|int
+          }) %}
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  {% endif %}
+
+  <div class="card">
+    <div class="card-b">
+      <h2>Approaching thresholds (stored data)</h2>
+      <p class="sub" style="margin-top:6px;">Metrics that reached 80-99% of configured thresholds but did not trigger alerts.</p>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        These values did not trigger alerts. Displayed for situational awareness only.
+      </div>
+      {% if near_miss_items|length == 0 %}
+        <div class="callout" style="margin-top:12px;">
+          No values approached alert thresholds for this run.
+        </div>
+      {% else %}
+        <table style="width:100%; border-collapse:collapse; margin-top:12px;">
+          <thead>
+            <tr>
+              <th style="text-align:left; border-bottom:1px solid var(--border); padding:8px 0;">Metric</th>
+              <th style="text-align:right; border-bottom:1px solid var(--border); padding:8px 0;">Observed Value</th>
+              <th style="text-align:right; border-bottom:1px solid var(--border); padding:8px 0;">Threshold</th>
+              <th style="text-align:right; border-bottom:1px solid var(--border); padding:8px 0;">Proximity</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in near_miss_items %}
+              <tr>
+                <td style="padding:8px 0;">{{ item.metric }}</td>
+                <td style="padding:8px 0; text-align:right; font-family:var(--font-mono);">{{ item.observed }}</td>
+                <td style="padding:8px 0; text-align:right; font-family:var(--font-mono);">{{ item.threshold }}</td>
+                <td style="padding:8px 0; text-align:right; font-family:var(--font-mono);">{{ item.proximity }}%</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+
+  {# P0-S1: Category Breakdown Summary - Display stored expense categorisation #}
+  {% if summary.charts and summary.charts.expense_breakdown and summary.charts.expense_breakdown|length > 0 %}
+  <div class="card">
+    <div class="card-b">
+      <h2>Category distribution (stored)</h2>
+      <p class="sub" style="margin-top:6px;">
+        Expense categorisation as stored at run time. Categories shown reflect the categorisation applied during ingestion.
+      </p>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        Showing top {{ summary.charts.expense_breakdown|length }} categories by expense amount.
+      </div>
+      <div style="margin-top:12px;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border);">
+              <th style="text-align:left; padding:8px 4px; font-weight:700;">Category</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700;">Amount</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700;">Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% set total_expense = summary.window_expense or 1.0 %}
+            {% for item in summary.charts.expense_breakdown %}
+              <tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:8px 4px;">{{ item.label }}</td>
+                <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                  {{ item.value|money(summary.currency or 'AUD') }}
+                </td>
+                <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                  {% if total_expense > 0 %}
+                    {{ ((item.value / total_expense) * 100)|num(1) }}%
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        Total window expense: {{ summary.window_expense|money(summary.currency or 'AUD') if summary.window_expense is not none else '—' }}
+      </div>
+      <div class="small" style="margin-top:4px; color:var(--muted);">
+        Categories are displayed as stored. "Uncategorised" appears if present in the data.
+      </div>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+  {% endif %}
+
+  {# P0-S2: Top N Counterparties Summary - Display stored counterparty breakdown #}
+  {% if summary.concentration_top_vendors_expense and summary.concentration_top_vendors_expense|length > 0 %}
+  <div class="card">
+    <div class="card-b">
+      <h2>Top expense counterparties (stored)</h2>
+      <p class="sub" style="margin-top:6px;">
+        Expense counterparty breakdown as stored at run time. Counterparties shown reflect the identifiers captured during ingestion.
+      </p>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        Showing top {{ summary.concentration_top_vendors_expense|length }} expense counterparties by amount.
+      </div>
+      <div style="margin-top:12px;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border);">
+              <th style="text-align:left; padding:8px 4px; font-weight:700;">Counterparty</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700;">Amount</th>
+              <th style="text-align:right; padding:8px 4px; font-weight:700;">Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {# share stored as fraction 0-1, multiply by 100 for percentage display #}
+            {% for item in summary.concentration_top_vendors_expense %}
+              <tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:8px 4px;">{{ item.counterparty }}</td>
+                <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                  {{ item.amount|money(summary.currency or 'AUD') }}
+                </td>
+                <td style="padding:8px 4px; text-align:right; font-family:var(--font-mono); font-size:12px;">
+                  {{ (item.share * 100)|num(1) }}%
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        Total window expense: {{ summary.window_expense|money(summary.currency or 'AUD') if summary.window_expense is not none else '—' }}
+      </div>
+      <div class="small" style="margin-top:4px; color:var(--muted);">
+        Counterparties are displayed as stored. "Unknown" appears if counterparty identifiers were not available.
+      </div>
+    </div>
+  </div>
+
+  <div style="height:14px;"></div>
+  {% endif %}
 
   <details class="card disclosure">
     <summary style="cursor:pointer; font-weight:900; padding:16px 20px;">Technical / audit details (stored)</summary>
@@ -703,7 +1229,7 @@
                   {%- if vendor_name == '' or vendor_name|lower == 'nan' or vendor_name|lower == 'none' or vendor_name|lower == 'null' -%}
                     <span style="color:var(--muted); font-style:italic;">(No vendor recorded)</span>
                   {%- else -%}
-                    {{ vendor_name }}
+                    {{ vendor_name|redact_vendor(access_role) }}
                   {%- endif -%}
                 </td>
                 <td style="padding:6px 0;">{{ v.amount|money(summary.currency) }}</td>
@@ -792,11 +1318,13 @@
               <details style="margin-top:10px;">
                 <summary style="cursor:pointer; font-weight:900;">Update status (stored)</summary>
                 <div style="height:8px;"></div>
+                {% if can_update and access_role in ['operator', 'manager', 'admin'] %}
                 <form method="post" action="/run/{{ run_id }}/feedback" class="status-form">
+                  {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
                   <input type="hidden" name="alert_id" value="{{ a.id }}">
                   <div class="field">
                     <label>Status</label>
-                    <select name="status" {% if not can_update %}disabled{% endif %}>
+                    <select name="status">
                       {% for opt in ['review','noted','acknowledged','ignore','snoozed'] %}
                         <option value="{{ opt }}" {{ 'selected' if a._status==opt else '' }}>{{ opt|capitalize }}</option>
                       {% endfor %}
@@ -810,16 +1338,14 @@
                   </div>
                   <div class="field" style="margin-top:10px;">
                     <label>Note</label>
-                    <textarea name="note" class="note-textarea js-autosize" placeholder="Optional note (stored)" {% if not can_update %}disabled{% endif %}>{{ a._note }}</textarea>
+                    <textarea name="note" class="note-textarea js-autosize" placeholder="Optional note (stored)">{{ a._note }}</textarea>
                   </div>
                   <div class="row" style="margin-top:10px;">
-                    <button class="btn btn-primary" type="submit" {% if not can_update %}disabled{% else %}disabled{% endif %}>Record status</button>
+                    <button class="btn btn-primary" type="submit">Record status</button>
                   </div>
-                  {% if can_update %}
-                    <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
-                      Button enables when status or note changes.
-                    </div>
-                  {% endif %}
+                  <div class="small" style="color:var(--muted); font-size:12px; margin-top:6px;">
+                    Button enables when status or note changes.
+                  </div>
                   <div class="row" style="margin-top:10px; flex-wrap:wrap;">
                     <div class="pill dim">Signal band (stored): {{ a.signal_strength }}</div>
                     {% if a.suppressed and a.suppression_reason %}
@@ -837,6 +1363,33 @@
                     {% endif %}
                   </div>
                 </form>
+                {% else %}
+                <div style="padding:12px; background:var(--bg-dim); border-radius:var(--radius-sm); color:var(--muted);">
+                  <div style="font-weight:700; margin-bottom:6px;">Status (stored): {{ a._status|capitalize }}</div>
+                  <div style="font-size:13px; margin-bottom:8px;">Last updated: {{ a._updated_at|humandt if a._updated_at else 'Not recorded' }}</div>
+                  {% if a._note and a._note.strip() %}
+                  <div style="font-weight:700; margin-top:12px; margin-bottom:4px;">Note (stored):</div>
+                  <div style="font-size:13px; margin-bottom:8px; white-space:pre-wrap;">{{ a._note }}</div>
+                  {% endif %}
+                  <div style="font-size:13px;">This status is read-only for your role or because this is a stored snapshot.</div>
+                </div>
+                <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+                  <div class="pill dim">Signal band (stored): {{ a.signal_strength }}</div>
+                  {% if a.suppressed and a.suppression_reason %}
+                    <div class="pill dim">Suppressed (stored): {{ a.suppression_reason }}</div>
+                  {% elif a.suppressed %}
+                    <div class="pill dim">Suppressed (stored)</div>
+                  {% endif %}
+                  {% if a.quality_context and a.quality_context.score is not none %}
+                    <div class="pill dim">
+                      Data completeness (stored): {{ '%.0f'|format(a.quality_context.score) }}/100
+                      {% if a.quality_context.threshold is not none %}
+                        (threshold {{ a.quality_context.threshold }})
+                      {% endif %}
+                    </div>
+                  {% endif %}
+                </div>
+                {% endif %}
               </details>
             </div>
           {% endfor %}
@@ -926,6 +1479,71 @@
         <div class="pill dim">Rows (stored): {{ quality.window_rows }} (window), {{ quality.total_rows }} (total)</div>
         <div class="pill dim">Days covered (stored): {{ quality.window_days_covered }}</div>
       </div>
+
+      {# P1-U3: Data Quality Indicators - Display stored quality metrics and flags #}
+      {% if quality.uncategorised_share is not none or quality.unknown_vendor_share is not none or quality.dup_rate is not none %}
+      <div class="hr"></div>
+      <div style="font-weight:900; margin-bottom:8px;">Data composition (stored)</div>
+      <table style="width:100%; border-collapse:collapse; font-size:13px;">
+        <tbody>
+          {% if quality.uncategorised_share is not none %}
+          <tr>
+            <td style="padding:6px 0; width:50%;">Uncategorised transactions</td>
+            <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ (quality.uncategorised_share * 100)|num(1) }}%</td>
+          </tr>
+          {% endif %}
+          {% if quality.unknown_vendor_share is not none %}
+          <tr>
+            <td style="padding:6px 0;">Unknown counterparties</td>
+            <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ (quality.unknown_vendor_share * 100)|num(1) }}%</td>
+          </tr>
+          {% endif %}
+          {% if quality.dup_rate is not none %}
+          <tr>
+            <td style="padding:6px 0;">Duplicate-like rows</td>
+            <td style="padding:6px 0; text-align:right; font-family:var(--font-mono);">{{ (quality.dup_rate * 100)|num(1) }}%</td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+      {% endif %}
+
+      {% if quality.validation_gates and quality.validation_gates|length > 0 %}
+      <div class="hr"></div>
+      <div style="font-weight:900; margin-bottom:8px;">Field detection (stored)</div>
+      <table style="width:100%; border-collapse:collapse; font-size:13px;">
+        <tbody>
+          {% for gate in quality.validation_gates %}
+          <tr>
+            <td style="padding:6px 0;">{{ gate.gate|replace('_', ' ')|title }}</td>
+            <td style="padding:6px 0; text-align:right;">
+              {% if gate.passed %}
+                <span style="color:var(--success, #059669);">✓ Present</span>
+              {% else %}
+                <span style="color:var(--muted);">— Not detected</span>
+                {% if gate.missing and gate.missing|length > 0 %}
+                  <span style="font-size:11px; color:var(--muted);"> ({{ gate.missing|join(', ') }})</span>
+                {% endif %}
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+
+      {% if quality.flags and quality.flags|length > 0 %}
+      <div class="hr"></div>
+      <div style="font-weight:900; margin-bottom:8px;">Data notes (stored)</div>
+      <ul style="margin:0; padding-left:20px; font-size:13px; color:var(--muted);">
+        {% for flag in quality.flags %}
+        <li style="margin-bottom:4px;">{{ flag }}</li>
+        {% endfor %}
+      </ul>
+      <div class="small" style="margin-top:8px; color:var(--muted);">
+        These are descriptive notes about data characteristics. They do not indicate errors or require action.
+      </div>
+      {% endif %}
     </div>
   </div>
 
@@ -1278,4 +1896,48 @@
   </div>
     </div>
   </details>
+
+  <!-- E1: Snapshot Provenance Section -->
+  {% if provenance %}
+  <details style="margin-top:32px;">
+    <summary style="cursor:pointer; font-weight:800; font-size:15px; padding:12px 0;">
+      Snapshot Provenance
+    </summary>
+    <div class="card" style="margin-top:12px;">
+      <div class="card-b">
+        <p style="margin:0 0 16px 0; color:var(--muted); font-size:14px;">
+          This snapshot was generated using fixed rules and stored inputs. Results are repeatable and auditable.
+        </p>
+        <table style="width:100%; border-collapse:collapse;">
+          <tbody>
+            <tr>
+              <td style="padding:8px 0; font-weight:700; width:200px;">Snapshot ID</td>
+              <td style="padding:8px 0; font-family:monospace; font-size:13px;">{{ provenance.snapshot_id }}</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:700;">Created (UTC)</td>
+              <td style="padding:8px 0; font-family:monospace; font-size:13px;">{{ provenance.created_at }}</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:700;">File Hash (SHA-256)</td>
+              <td style="padding:8px 0; font-family:monospace; font-size:11px; word-break:break-all;">{{ provenance.file_sha256 }}</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:700;">Settings Hash</td>
+              <td style="padding:8px 0; font-family:monospace; font-size:11px; word-break:break-all;">{{ provenance.settings_hash }}</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:700;">Rule Inventory Hash</td>
+              <td style="padding:8px 0; font-family:monospace; font-size:11px; word-break:break-all;">{{ provenance.rule_inventory_hash }}</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0; font-weight:700;">Code Version Hash</td>
+              <td style="padding:8px 0; font-family:monospace; font-size:11px; word-break:break-all;">{{ provenance.code_hash }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+  {% endif %}
 {% endblock %}

@@ -21,6 +21,30 @@ Norvion is a deterministic, audit-first early-warning system for small and mediu
 
 ## Architecture and Scale Considerations
 
+### Enterprise Pilot Mode (Single Instance)
+
+**Current Deployment Profile**: Norvion is designed for **single-instance enterprise pilot deployments**. This profile balances production-grade security with operational simplicity.
+
+**Supported:**
+- ✓ Single-instance deployments (one application process)
+- ✓ Logical multi-tenancy (multiple tenants on one instance)
+- ✓ Production-grade security (CSRF, RBAC, audit logging, TOS enforcement)
+- ✓ Comprehensive compliance controls (SOC 2 alignment, separation of duties)
+
+**Not Yet Supported (Requires Upgrade):**
+- ✗ Horizontal scaling (multiple application instances behind load balancer)
+- ✗ Distributed rate limiting (current implementation is in-memory only)
+- ✗ High-availability / failover (single instance = single point of failure)
+
+**For Horizontal Scaling:**
+- Redis-backed rate limiting required (see `DEPLOYMENT_CHECKLIST.md`)
+- PostgreSQL recommended for better replication/backup support
+- Centralized session storage may be needed
+
+**See**: `DEPLOYMENT_CHECKLIST.md` for full deployment requirements and scaling guidance.
+
+---
+
 ### Database: SQLite
 
 **Current Implementation**: Norvion uses SQLite with WAL mode for data persistence.

@@ -265,8 +265,8 @@
 
     <div class="card">
       <div class="card-b">
-        <h2>API endpoints available (read-only)</h2>
-        <p class="sub" style="margin-top:6px;">Writes are disabled in audit mode.</p>
+        <h2>API endpoints available{% if not is_admin %} (read-only){% endif %}</h2>
+        <p class="sub" style="margin-top:6px;">{% if is_admin %}Read-only API endpoints for external integrations.{% else %}Writes are disabled for your role.{% endif %}</p>
         <ul style="margin:10px 0 0 18px;">
           <li><a class="link" href="/api/ui/dashboard">/api/ui/dashboard</a></li>
           {% if run_link_id %}
@@ -276,6 +276,17 @@
           <li><a class="link" href="/api/ui/alerts">/api/ui/alerts</a></li>
           <li><a class="link" href="/api/ui/access/events">/api/ui/access/events</a></li>
         </ul>
+      </div>
+    </div>
+
+    <!-- E5: Data Retention Statement -->
+    <div class="card" style="margin-top:16px;">
+      <div class="card-b">
+        <h2>Data Retention</h2>
+        <div class="hr"></div>
+        <p style="margin:12px 0 0 0; color:var(--text); line-height:1.6;">
+          Snapshots are retained as immutable audit records. Retention policies are defined by the organization.
+        </p>
       </div>
     </div>
   </details>

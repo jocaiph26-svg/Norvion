@@ -30,8 +30,14 @@
     <div class="card">
       <div class="card-b">
         <div class="empty">
-          <div class="empty-title">No runs yet</div>
-          <div class="empty-sub">Upload a CSV to create your first run.</div>
+          <div class="empty-title">No snapshots yet</div>
+          <div class="empty-sub">
+            Upload transaction data to generate your first deterministic snapshot.
+            All results are stored for audit purposes.
+          </div>
+          {% if access_role in ['operator', 'manager', 'admin'] %}
+          <a class="btn" href="/upload" style="margin-top:16px;">Upload CSV</a>
+          {% endif %}
         </div>
       </div>
     </div>
@@ -116,7 +122,7 @@
 
     <div class="grid cols-3">
       <div class="card kpi">
-        <div class="label">Calculated cash position</div>
+        <div class="label">Cash position snapshot</div>
         <div class="value">
           {% if s.current_cash is not none %}
             {{ s.current_cash|money(s.currency) }}
@@ -124,14 +130,14 @@
         </div>
         <div class="hint">
           {% if s.current_cash is not none %}
-            Computed from starting cash + cumulative net change.
+            Snapshot only: starting cash + cumulative net change at analysis time. Not a current balance.
           {% else %}
             Not available for this run.
           {% endif %}
         </div>
       </div>
       <div class="card kpi">
-        <div class="label">Calculated runway (static burn)</div>
+        <div class="label">Cash coverage snapshot (historical)</div>
         <div class="value">
           {% if s.runway_days is not none and s.runway_days <= 0 %}
             ≤0 days
@@ -141,7 +147,7 @@
         </div>
         <div class="hint">
           {% if s.runway_days is not none %}
-            Computed from current cash ÷ burn rate (static). Does not account for future changes.
+            Historical snapshot: cash balance ÷ recent daily expense. Not a forecast. Does not predict future income or expense changes.
           {% else %}
             Not available for this run.
           {% endif %}
