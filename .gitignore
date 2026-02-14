@@ -86,3 +86,9 @@ app.db-*
 *.db
 *.sqlite
 *.sqlite3
+
+# runtime/db artifacts
+app.db
+app.db-*
+*.sqlite
+*.sqlite3
