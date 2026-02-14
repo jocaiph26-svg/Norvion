@@ -67,3 +67,22 @@ Viewer Screenshots/
 
 # OS/editor
 .DS_Store
+
+# Virtualenvs
+.venv/
+venv/
+
+# Python junk
+__pycache__/
+*.pyc
+
+# Runtime scratch
+tmp/
+artifacts/
+
+# Local DB
+app.db
+app.db-*
+*.db
+*.sqlite
+*.sqlite3
