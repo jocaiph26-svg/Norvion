@@ -39,3 +39,31 @@ __MACOSX/
 # Database
 *.db
 *.sqlite3
+/artifacts/e2e_rbac_after.txt
+# Local databases / sqlite artifacts
+app.db
+app.db-*
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Runtime scratch
+tmp/
+artifacts/
+
+# Large bundles / exports
+Archive.zip
+*.zip
+
+# Screenshots / images
+Viewer Screenshots/
+*.png
+*.jpg
+*.jpeg
+
+# Virtualenv
+.venv/
+
+# OS/editor
+.DS_Store

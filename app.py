@@ -124,6 +124,10 @@ def generate_password_hash(password: str) -> str:
     )
     return f"pbkdf2:sha256:{PBKDF2_ITERATIONS}${salt}${dk.hex()}"
 
+def _utc_now_iso() -> str:
+    """Return current UTC time as ISO 8601 string (no timezone suffix)."""
+    return datetime.utcnow().isoformat()
+
 def check_password_hash(pwhash: str, password: str) -> bool:
     """Verify a password against a PBKDF2-SHA256 hash."""
     if not pwhash or not password:
@@ -1481,7 +1485,7 @@ def _get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
     """Fetch user by ID."""
     with db_conn() as conn:
         row = conn.execute(
-            "SELECT id, tenant_id, email, role, is_active, created_at, last_login_at, tos_version, tos_accepted_at FROM users WHERE id = ?",
+            "SELECT id, tenant_id, email, role, is_active, created_at, last_login_at, tos_version, tos_accepted_at, session_version FROM users WHERE id = ?",
             (int(user_id),),
         ).fetchone()
         if row:
@@ -1495,6 +1499,7 @@ def _get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
                 "last_login_at": str(row["last_login_at"]) if row["last_login_at"] else None,
                 "tos_version": str(row["tos_version"]) if row["tos_version"] else None,
                 "tos_accepted_at": str(row["tos_accepted_at"]) if row["tos_accepted_at"] else None,
+                "session_version": int(row["session_version"]) if row["session_version"] is not None else 1,
             }
     return None
 
@@ -1503,12 +1508,12 @@ def _get_user_by_email(email: str, tenant_id: Optional[str] = None) -> Optional[
     with db_conn() as conn:
         if tenant_id:
             row = conn.execute(
-                "SELECT id, tenant_id, email, password_hash, role, is_active, created_at FROM users WHERE email = ? AND tenant_id = ?",
+                "SELECT id, tenant_id, email, password_hash, role, is_active, created_at, session_version FROM users WHERE email = ? AND tenant_id = ?",
                 (email.lower().strip(), tenant_id),
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT id, tenant_id, email, password_hash, role, is_active, created_at FROM users WHERE email = ?",
+                "SELECT id, tenant_id, email, password_hash, role, is_active, created_at, session_version FROM users WHERE email = ?",
                 (email.lower().strip(),),
             ).fetchone()
         if row:
@@ -1520,6 +1525,7 @@ def _get_user_by_email(email: str, tenant_id: Optional[str] = None) -> Optional[
                 "role": str(row["role"]),
                 "is_active": bool(row["is_active"]),
                 "created_at": str(row["created_at"]),
+                "session_version": int(row["session_version"]) if row["session_version"] is not None else 1,
             }
     return None
 
@@ -1712,6 +1718,7 @@ def _log_access(
 
 def _require_role(request: Request, min_role: str, action: str, resource: str) -> str:
     """Require minimum role for action. Raises HTTPException if denied."""
+    _require_auth(request)
     # First check TOS acceptance for non-exempt routes
     _require_tos(request)
     role = _access_role(request)
@@ -5185,7 +5192,10 @@ async def reset_password_submit(
     # Update password
     password_hash = generate_password_hash(password)
     with db_conn() as conn:
-        conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+        conn.execute(
+            "UPDATE users SET password_hash = ?, session_version = session_version + 1 WHERE id = ?",
+            (password_hash, user_id),
+        )
         conn.commit()
 
     # Consume token
@@ -5339,9 +5349,9 @@ async def admin_create_user(
     csrf_token: Optional[str] = Form(None),
     stepup_password: Optional[str] = Form(None),
 ):
-    """Create new user (manager and admin, requires step-up)."""
+    """Create new user (admin, requires step-up)."""
     _require_csrf(request, csrf_token)
-    _require_role(request, "manager", "create", "user")
+    _require_role(request, "admin", "create", "user")
 
     # Step-up inline: if not verified and no password provided, redirect to form with error
     if not _require_stepup(request):
@@ -5470,12 +5480,13 @@ async def admin_update_user(
         if role is not None and role not in ["viewer", "operator"]:
             raise HTTPException(status_code=403, detail="Managers can only assign Viewer or Operator roles")
 
-    # HIGH(7): Check if role is changing - if so, increment session_version to invalidate existing sessions
+    # HIGH(7): Check if role or active status is changing - increment session_version to invalidate existing sessions
     role_changed = target_user["role"] != role
+    active_changed = bool(target_user["is_active"]) != bool(1 if is_active else 0)
 
     # Update
     with db_conn() as conn:
-        if role_changed:
+        if role_changed or active_changed:
             # Increment session_version to force re-login
             conn.execute(
                 "UPDATE users SET role = ?, is_active = ?, session_version = session_version + 1 WHERE id = ? AND tenant_id = ?",
